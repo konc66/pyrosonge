@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import aiosqlite
+import aiohttp
 import base64
 import re
 import os
@@ -34,14 +35,6 @@ logging.basicConfig(
     ]
 )
 log = logging.getLogger("pyrosonge")
-
-# --- DB (async) ---
-async def get_db() -> aiosqlite.Connection:
-    db = await aiosqlite.connect(DB_PATH)
-    db.row_factory = aiosqlite.Row
-    await db.execute("PRAGMA journal_mode=WAL")
-    return db
-
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -108,8 +101,7 @@ def is_admin(ctx: commands.Context) -> bool:
 
 
 # --- Gemini Vision (REST API, async, avec timeout) ---
-async def analyze_screenshot(image_bytes: bytes, media_type: str) -> dict:
-    import aiohttp
+async def analyze_screenshot(image_bytes: bytes) -> dict:
 
     prompt = """Analyse ce screenshot de fin de Songe Dofus. Extrais les données suivantes en JSON strict :
 {
@@ -145,39 +137,33 @@ Réponds UNIQUEMENT avec le JSON, rien d'autre."""
     global _gemini_key_index
     timeout = aiohttp.ClientTimeout(total=GEMINI_TIMEOUT)
     result = None
-    last_error = "Toutes les clés API ont échoué"
+    models = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"]
 
-    for key_attempt in range(len(GEMINI_API_KEYS)):
-        key = GEMINI_API_KEYS[(_gemini_key_index + key_attempt) % len(GEMINI_API_KEYS)]
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={key}"
-        success = False
+    for model in models:
+        for key_attempt in range(len(GEMINI_API_KEYS)):
+            key = GEMINI_API_KEYS[(_gemini_key_index + key_attempt) % len(GEMINI_API_KEYS)]
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
 
-        for retry in range(3):
             try:
                 async with aiohttp.ClientSession(timeout=timeout) as session:
                     async with session.post(url, json=payload, ssl=False) as resp:
-                        if resp.status in (429, 503) and retry < 2:
-                            await asyncio.sleep(2 ** retry)
-                            continue
                         if resp.status in (429, 503):
-                            last_error = f"Gemini API erreur {resp.status}"
-                            break
+                            continue
                         if resp.status != 200:
                             body = await resp.text()
                             raise ValueError(f"Gemini API erreur {resp.status}: {body[:200]}")
                         result = await resp.json()
                         _gemini_key_index = (_gemini_key_index + key_attempt + 1) % len(GEMINI_API_KEYS)
-                        success = True
-                        break
             except asyncio.TimeoutError:
-                last_error = "Gemini timeout"
-                break
+                continue
 
-        if success:
+            if result:
+                break
+        if result:
             break
 
     if result is None:
-        raise ValueError(last_error)
+        raise ValueError("Toutes les clés API et modèles sont épuisés. Réessaie plus tard.")
 
     text = result["candidates"][0]["content"]["parts"][0]["text"].strip()
 
@@ -215,7 +201,7 @@ async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         return
     log.error(f"Erreur commande {ctx.command}: {error}", exc_info=error)
-    await ctx.reply(f"❌ Une erreur est survenue: {error}")
+    await ctx.reply("❌ Une erreur est survenue. Réessaie ou contacte un admin.")
 
 
 # =====================
@@ -246,15 +232,12 @@ async def songe(ctx: commands.Context):
 
     try:
         image_bytes = await attachment.read()
-        media_type = attachment.content_type
 
         try:
-            data = await analyze_screenshot(image_bytes, media_type)
-        except asyncio.TimeoutError:
-            await msg.edit(content="❌ Gemini n'a pas répondu à temps. Réessaie dans quelques secondes.")
-            return
-        except ValueError as e:
-            await msg.edit(content=f"❌ Erreur d'analyse: {e}")
+            data = await analyze_screenshot(image_bytes)
+        except (asyncio.TimeoutError, ValueError) as e:
+            log.error(f"Erreur analyse Gemini: {e}")
+            await msg.edit(content="❌ Le bot subit un problème technique. Réessaie dans quelques minutes.")
             return
 
         intensite = data.get("intensite", "Inconnu")
@@ -268,24 +251,25 @@ async def songe(ctx: commands.Context):
         intensite_rank = get_intensite_rank(intensite)
         temps_seconds = parse_time_to_seconds(temps_display)
 
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("""
-                INSERT INTO runs (timestamp, intensite, intensite_rank, temps_seconds, temps_display,
-                                resultat, palier, score, tours, songeur, submitted_by)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                datetime.now(UTC).isoformat(), intensite, intensite_rank, temps_seconds,
-                temps_display, resultat, palier, score, tours, songeur, ctx.author.id
-            ))
-            run_id = cursor.lastrowid
+        if resultat == "Victoire":
+            async with aiosqlite.connect(DB_PATH) as db:
+                cursor = await db.execute("""
+                    INSERT INTO runs (timestamp, intensite, intensite_rank, temps_seconds, temps_display,
+                                    resultat, palier, score, tours, songeur, submitted_by)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    datetime.now(UTC).isoformat(), intensite, intensite_rank, temps_seconds,
+                    temps_display, resultat, palier, score, tours, songeur, ctx.author.id
+                ))
+                run_id = cursor.lastrowid
 
-            for member in mentioned:
-                await db.execute("INSERT OR IGNORE INTO run_players (run_id, discord_id, discord_name) VALUES (?, ?, ?)",
-                                 (run_id, member.id, member.display_name))
-            await db.commit()
+                for member in mentioned:
+                    await db.execute("INSERT OR IGNORE INTO run_players (run_id, discord_id, discord_name) VALUES (?, ?, ?)",
+                                     (run_id, member.id, member.display_name))
+                await db.commit()
 
         embed = discord.Embed(
-            title=f"{'✅ Victoire' if resultat == 'Victoire' else '❌ Défaite'} — Songe enregistré",
+            title=f"{'✅ Victoire — Songe enregistré' if resultat == 'Victoire' else '❌ Défaite — Non enregistré'}",
             color=discord.Color.green() if resultat == "Victoire" else discord.Color.red()
         )
         embed.add_field(name="Intensité", value=intensite, inline=True)
@@ -295,10 +279,11 @@ async def songe(ctx: commands.Context):
         if songeur:
             embed.add_field(name="Songeur", value=songeur, inline=True)
         embed.add_field(name="Joueurs", value=" ".join(m.mention for m in mentioned), inline=False)
-        embed.set_footer(text=f"Run #{run_id}")
+        if resultat == "Victoire":
+            embed.set_footer(text=f"Run #{run_id}")
 
         await msg.edit(content=None, embed=embed)
-        log.info(f"Run #{run_id} enregistrée: {intensite} {resultat} par {ctx.author}")
+        log.info(f"Songe {resultat}: {intensite} par {ctx.author}" + (f" — Run #{run_id}" if resultat == "Victoire" else ""))
 
     except Exception as e:
         log.error(f"Erreur commande songe: {e}", exc_info=True)

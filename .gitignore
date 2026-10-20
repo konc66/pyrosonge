@@ -1,0 +1,6 @@
+.env
+songe.db
+pyrosonge.log
+__pycache__/
+*.pyc
+venv/

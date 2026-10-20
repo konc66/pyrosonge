@@ -18,7 +18,7 @@ DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 ALLOWED_CHANNEL_IDS = [int(x.strip()) for x in os.environ["ALLOWED_CHANNEL_IDS"].split(",")]
 ADMIN_ROLE_NAME = os.environ.get("ADMIN_ROLE_NAME", "Pyrosonge Admin")
-GEMINI_TIMEOUT = 30
+GEMINI_TIMEOUT = 60
 DB_PATH = "songe.db"
 
 # --- Logging ---
@@ -135,12 +135,18 @@ Réponds UNIQUEMENT avec le JSON, rien d'autre."""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={GEMINI_API_KEY}"
     timeout = aiohttp.ClientTimeout(total=GEMINI_TIMEOUT)
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(url, json=payload, ssl=False) as resp:
-            if resp.status != 200:
-                body = await resp.text()
-                raise ValueError(f"Gemini API erreur {resp.status}: {body[:200]}")
-            result = await resp.json()
+    max_retries = 3
+    for attempt in range(max_retries):
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=payload, ssl=False) as resp:
+                if resp.status == 503 and attempt < max_retries - 1:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise ValueError(f"Gemini API erreur {resp.status}: {body[:200]}")
+                result = await resp.json()
+        break
 
     text = result["candidates"][0]["content"]["parts"][0]["text"].strip()
 

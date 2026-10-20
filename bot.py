@@ -9,13 +9,16 @@ import json
 import logging
 import asyncio
 from datetime import datetime, UTC
+from io import BytesIO
+from PIL import Image
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # --- Config ---
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+GEMINI_API_KEYS = [k.strip() for k in os.environ["GEMINI_API_KEYS"].split(",") if k.strip()]
+_gemini_key_index = 0
 ALLOWED_CHANNEL_IDS = [int(x.strip()) for x in os.environ["ALLOWED_CHANNEL_IDS"].split(",")]
 ADMIN_ROLE_NAME = os.environ.get("ADMIN_ROLE_NAME", "Pyrosonge Admin")
 GEMINI_TIMEOUT = 60
@@ -121,7 +124,14 @@ async def analyze_screenshot(image_bytes: bytes, media_type: str) -> dict:
 
 Réponds UNIQUEMENT avec le JSON, rien d'autre."""
 
-    image_b64 = base64.b64encode(image_bytes).decode()
+    img = Image.open(BytesIO(image_bytes))
+    img.thumbnail((1280, 1280))
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=80)
+    compressed = buf.getvalue()
+    media_type = "image/jpeg"
+
+    image_b64 = base64.b64encode(compressed).decode()
 
     payload = {
         "contents": [{
@@ -132,21 +142,42 @@ Réponds UNIQUEMENT avec le JSON, rien d'autre."""
         }]
     }
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={GEMINI_API_KEY}"
+    global _gemini_key_index
     timeout = aiohttp.ClientTimeout(total=GEMINI_TIMEOUT)
+    result = None
+    last_error = "Toutes les clés API ont échoué"
 
-    max_retries = 3
-    for attempt in range(max_retries):
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(url, json=payload, ssl=False) as resp:
-                if resp.status == 503 and attempt < max_retries - 1:
-                    await asyncio.sleep(2 ** attempt)
-                    continue
-                if resp.status != 200:
-                    body = await resp.text()
-                    raise ValueError(f"Gemini API erreur {resp.status}: {body[:200]}")
-                result = await resp.json()
-        break
+    for key_attempt in range(len(GEMINI_API_KEYS)):
+        key = GEMINI_API_KEYS[(_gemini_key_index + key_attempt) % len(GEMINI_API_KEYS)]
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={key}"
+        success = False
+
+        for retry in range(3):
+            try:
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(url, json=payload, ssl=False) as resp:
+                        if resp.status in (429, 503) and retry < 2:
+                            await asyncio.sleep(2 ** retry)
+                            continue
+                        if resp.status in (429, 503):
+                            last_error = f"Gemini API erreur {resp.status}"
+                            break
+                        if resp.status != 200:
+                            body = await resp.text()
+                            raise ValueError(f"Gemini API erreur {resp.status}: {body[:200]}")
+                        result = await resp.json()
+                        _gemini_key_index = (_gemini_key_index + key_attempt + 1) % len(GEMINI_API_KEYS)
+                        success = True
+                        break
+            except asyncio.TimeoutError:
+                last_error = "Gemini timeout"
+                break
+
+        if success:
+            break
+
+    if result is None:
+        raise ValueError(last_error)
 
     text = result["candidates"][0]["content"]["parts"][0]["text"].strip()
 

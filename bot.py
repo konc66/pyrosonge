@@ -13,7 +13,7 @@ import pytz
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 ALLOWED_CHANNEL_ID = int(os.environ["ALLOWED_CHANNEL_ID"])
-ADMIN_ROLE = os.environ.get("ADMIN_ROLE", "Officier")  # rôle autorisé à supprimer des runs
+ADMIN_ROLE = os.environ.get("ADMIN_ROLE", "PyroAdmin")  # rôle autorisé à reset/supprimer des runs
 TIMEZONE = pytz.timezone("Europe/Paris")
 
 # --- Events config ---
@@ -546,6 +546,34 @@ async def historique(ctx: commands.Context):
     await ctx.reply(embed=embed)
 
 
+reset_pending = {}
+
+@bot.command(name="reset")
+async def reset(ctx: commands.Context):
+    """!reset — Réinitialise toutes les runs (admin, double confirmation)."""
+    if ctx.channel.id != ALLOWED_CHANNEL_ID:
+        return
+
+    is_admin = any(role.name == ADMIN_ROLE for role in ctx.author.roles) or ctx.author.guild_permissions.administrator
+    if not is_admin:
+        await ctx.reply(f"❌ Tu dois avoir le rôle **{ADMIN_ROLE}** ou être administrateur.")
+        return
+
+    if reset_pending.get(ctx.author.id):
+        # Deuxième !reset = confirmation
+        conn = sqlite3.connect("songe.db")
+        c = conn.cursor()
+        c.execute("DELETE FROM run_players")
+        c.execute("DELETE FROM runs")
+        conn.commit()
+        conn.close()
+        reset_pending[ctx.author.id] = False
+        await ctx.reply("🗑️ **Toutes les runs ont été supprimées.** Base remise à zéro.")
+    else:
+        reset_pending[ctx.author.id] = True
+        await ctx.reply("⚠️ Es-tu sûr ? **Toutes les runs seront supprimées.** Retape `!reset` pour confirmer.")
+
+
 @bot.command(name="supprun")
 async def supprun(ctx: commands.Context, run_id: int = 0):
     """!supprun <id> — Supprime une run (admin)."""
@@ -674,7 +702,7 @@ async def aide(ctx: commands.Context):
     embed.add_field(name="🏆 Classements", value="`!classement` — classement Songe\n`!classement bolgrot` — classement Bolgrot", inline=False)
     embed.add_field(name="📊 Stats", value="`!stats @joueur` — stats d'un joueur\n`!historique @joueur` — historique des runs", inline=False)
     embed.add_field(name="📅 Événements", value="`!event` — événements en cours\n`!inscrits` — liste des inscrits", inline=False)
-    embed.add_field(name="🔧 Admin", value=f"`!supprun <id>` — supprimer une run (rôle {ADMIN_ROLE})", inline=False)
+    embed.add_field(name="🔧 Admin", value=f"`!supprun <id>` — supprimer une run\n`!reset` — réinitialiser toutes les runs\n(rôle {ADMIN_ROLE} requis)", inline=False)
 
     await ctx.reply(embed=embed)
 

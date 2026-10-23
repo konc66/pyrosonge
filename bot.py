@@ -1,71 +1,103 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import aiosqlite
-import aiohttp
+import sqlite3
 import base64
 import re
 import os
 import json
-import logging
-import asyncio
-from datetime import datetime, UTC
-from io import BytesIO
-from PIL import Image
-from dotenv import load_dotenv
-
-load_dotenv()
+from datetime import datetime
+import pytz
 
 # --- Config ---
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
-GEMINI_API_KEYS = [k.strip() for k in os.environ["GEMINI_API_KEYS"].split(",") if k.strip()]
-_gemini_key_index = 0
-ALLOWED_CHANNEL_IDS = [int(x.strip()) for x in os.environ["ALLOWED_CHANNEL_IDS"].split(",")]
-ADMIN_ROLE_NAME = os.environ.get("ADMIN_ROLE_NAME", "Pyrosonge Admin")
-GEMINI_TIMEOUT = 60
-DB_PATH = "songe.db"
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+ALLOWED_CHANNEL_ID = int(os.environ["ALLOWED_CHANNEL_ID"])
+ADMIN_ROLE = os.environ.get("ADMIN_ROLE", "Officier")  # rôle autorisé à supprimer des runs
+TIMEZONE = pytz.timezone("Europe/Paris")
 
-# --- Logging ---
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler("pyrosonge.log", encoding="utf-8"),
-        logging.StreamHandler()
-    ]
-)
-log = logging.getLogger("pyrosonge")
+# --- Events config ---
+EVENTS = {
+    "songe": {
+        "name": "Speed Rush Songe",
+        "start": os.environ.get("SONGE_START", "2026-10-26"),
+        "end": os.environ.get("SONGE_END", "2026-11-01"),
+        "prompt": """Analyse ce screenshot de fin de Songe Dofus. Extrais les données suivantes en JSON strict :
+{
+  "intensite": "ex: Paradoxe IV, Cauchemar I, Ardu III...",
+  "temps": "le temps affiché sur le récap, format MM:SS ou HH:MM:SS",
+  "resultat": "Victoire ou Défaite",
+  "palier": "le palier atteint si visible, sinon null",
+  "score": null,
+  "tours": le nombre de tours si visible sinon null,
+  "songeur": "le nom du songeur si visible, sinon null",
+  "date_ingame": "la date/heure visible dans le tchat en bas de l'écran (via /time ou /whois), sinon null"
+}
+Réponds UNIQUEMENT avec le JSON, rien d'autre.""",
+    },
+    "bolgrot": {
+        "name": "Speed Rush Bolgrot",
+        "start": os.environ.get("BOLGROT_START", "2099-01-01"),
+        "end": os.environ.get("BOLGROT_END", "2099-01-07"),
+        "prompt": """Analyse ce screenshot de fin de combat Dofus (donjon Bolgrot ou autre). Extrais les données suivantes en JSON strict :
+{
+  "intensite": "le niveau de difficulté ou mode si visible, sinon 'Normal'",
+  "temps": "le temps de combat affiché, format MM:SS ou HH:MM:SS",
+  "resultat": "Victoire ou Défaite",
+  "palier": null,
+  "score": null,
+  "tours": le nombre de tours si visible sinon null,
+  "songeur": null,
+  "date_ingame": "la date/heure visible dans le tchat en bas de l'écran (via /time ou /whois), sinon null"
+}
+Réponds UNIQUEMENT avec le JSON, rien d'autre.""",
+    },
+}
 
-async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                intensite TEXT NOT NULL,
-                intensite_rank INTEGER NOT NULL,
-                temps_seconds INTEGER NOT NULL,
-                temps_display TEXT NOT NULL,
-                resultat TEXT NOT NULL,
-                palier TEXT,
-                score INTEGER,
-                tours INTEGER,
-                songeur TEXT,
-                submitted_by INTEGER NOT NULL
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS run_players (
-                run_id INTEGER NOT NULL,
-                discord_id INTEGER NOT NULL,
-                discord_name TEXT NOT NULL,
-                FOREIGN KEY (run_id) REFERENCES runs(id),
-                UNIQUE(run_id, discord_id)
-            )
-        """)
-        await db.commit()
+# --- DB ---
+def init_db():
+    conn = sqlite3.connect("songe.db")
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL DEFAULT 'songe',
+            timestamp TEXT NOT NULL,
+            intensite TEXT NOT NULL,
+            intensite_rank INTEGER NOT NULL,
+            temps_seconds INTEGER NOT NULL,
+            temps_display TEXT NOT NULL,
+            resultat TEXT NOT NULL,
+            palier TEXT,
+            score INTEGER,
+            tours INTEGER,
+            songeur TEXT,
+            date_ingame TEXT,
+            submitted_by INTEGER NOT NULL
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS run_players (
+            run_id INTEGER NOT NULL,
+            discord_id INTEGER NOT NULL,
+            discord_name TEXT NOT NULL,
+            FOREIGN KEY (run_id) REFERENCES runs(id),
+            UNIQUE(run_id, discord_id)
+        )
+    """)
+    # Migration : ajouter event_type si la colonne n'existe pas
+    try:
+        c.execute("ALTER TABLE runs ADD COLUMN event_type TEXT NOT NULL DEFAULT 'songe'")
+    except:
+        pass
+    try:
+        c.execute("ALTER TABLE runs ADD COLUMN date_ingame TEXT")
+    except:
+        pass
+    conn.commit()
+    conn.close()
 
-# --- Intensité ranking (plus haut = mieux) ---
+# --- Intensité ranking ---
 INTENSITE_ORDER = {
     "normal": 0,
     "ardu i": 1, "ardu ii": 2, "ardu iii": 3, "ardu iv": 4, "ardu v": 5,
@@ -74,12 +106,8 @@ INTENSITE_ORDER = {
     "paradoxe i": 16, "paradoxe ii": 17, "paradoxe iii": 18, "paradoxe iv": 19, "paradoxe v": 20,
 }
 
-INTENSITE_NAMES = {v: k.title() for k, v in INTENSITE_ORDER.items()}
-
-
 def get_intensite_rank(intensite: str) -> int:
     return INTENSITE_ORDER.get(intensite.lower().strip(), -1)
-
 
 def parse_time_to_seconds(time_str: str) -> int:
     parts = time_str.strip().split(":")
@@ -89,89 +117,106 @@ def parse_time_to_seconds(time_str: str) -> int:
         return int(parts[0]) * 60 + int(parts[1])
     return 0
 
+def format_seconds(s: int) -> str:
+    h, r = divmod(s, 3600)
+    m, sec = divmod(r, 60)
+    if h > 0:
+        return f"{h}:{m:02d}:{sec:02d}"
+    return f"{m}:{sec:02d}"
 
-def is_allowed(ctx: commands.Context) -> bool:
-    return ctx.channel.id in ALLOWED_CHANNEL_IDS
+# --- Titres auto ---
+def get_title(temps_seconds: int, victoires: int, streak: int) -> str:
+    titles = []
+    if temps_seconds > 0 and temps_seconds < 600:
+        titles.append("⚡ Le Flash")
+    elif temps_seconds > 0 and temps_seconds < 1200:
+        titles.append("🏃 Le Rapide")
+    elif temps_seconds > 3600:
+        titles.append("🐢 Le Patient")
 
+    if victoires >= 20:
+        titles.append("👑 Le Vétéran")
+    elif victoires >= 10:
+        titles.append("⭐ L'Expérimenté")
+    elif victoires >= 5:
+        titles.append("🔥 L'Assidu")
 
-def is_admin(ctx: commands.Context) -> bool:
-    if ctx.author.guild_permissions.administrator:
-        return True
-    return any(r.name == ADMIN_ROLE_NAME for r in ctx.author.roles)
+    if streak >= 5:
+        titles.append("🔥🔥🔥 L'Inarrêtable")
+    elif streak >= 3:
+        titles.append("🔥🔥 En Série")
 
+    return " | ".join(titles) if titles else "🌱 Débutant"
 
-# --- Gemini Vision (REST API, async, avec timeout) ---
-async def analyze_screenshot(image_bytes: bytes) -> dict:
-
-    prompt = """Analyse ce screenshot de fin de Songe Dofus. Extrais les données suivantes en JSON strict :
-{
-  "intensite": "ex: Paradoxe IV, Cauchemar I, Ardu III...",
-  "temps": "le temps affiché, format HH:MM:SS ou MM:SS",
-  "resultat": "Victoire ou Défaite",
-  "palier": "le palier atteint si visible, sinon null",
-  "score": le score numérique si visible sinon null,
-  "tours": le nombre de tours si visible sinon null,
-  "songeur": "le nom du songeur si visible, sinon null"
-}
-
-Réponds UNIQUEMENT avec le JSON, rien d'autre."""
-
-    img = Image.open(BytesIO(image_bytes))
-    img.thumbnail((1280, 1280))
-    buf = BytesIO()
-    img.save(buf, format="JPEG", quality=80)
-    compressed = buf.getvalue()
-    media_type = "image/jpeg"
-
-    image_b64 = base64.b64encode(compressed).decode()
-
-    payload = {
-        "contents": [{
-            "parts": [
-                {"text": prompt},
-                {"inline_data": {"mime_type": media_type, "data": image_b64}}
-            ]
-        }]
-    }
-
-    global _gemini_key_index
-    timeout = aiohttp.ClientTimeout(total=GEMINI_TIMEOUT)
-    result = None
-    models = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"]
-
-    for model in models:
-        for key_attempt in range(len(GEMINI_API_KEYS)):
-            key = GEMINI_API_KEYS[(_gemini_key_index + key_attempt) % len(GEMINI_API_KEYS)]
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
-
-            try:
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.post(url, json=payload, ssl=False) as resp:
-                        if resp.status in (429, 503):
-                            continue
-                        if resp.status != 200:
-                            body = await resp.text()
-                            raise ValueError(f"Gemini API erreur {resp.status}: {body[:200]}")
-                        result = await resp.json()
-                        _gemini_key_index = (_gemini_key_index + key_attempt + 1) % len(GEMINI_API_KEYS)
-            except asyncio.TimeoutError:
-                continue
-
-            if result:
-                break
-        if result:
+def get_streak(discord_id: int, event_type: str = "songe") -> int:
+    conn = sqlite3.connect("songe.db")
+    c = conn.cursor()
+    c.execute("""
+        SELECT r.resultat FROM runs r
+        JOIN run_players rp ON r.id = rp.run_id
+        WHERE rp.discord_id = ? AND r.event_type = ?
+        ORDER BY r.id DESC
+    """, (discord_id, event_type))
+    streak = 0
+    for (resultat,) in c.fetchall():
+        if resultat == "Victoire":
+            streak += 1
+        else:
             break
+    conn.close()
+    return streak
 
-    if result is None:
-        raise ValueError("Toutes les clés API et modèles sont épuisés. Réessaie plus tard.")
+# --- Gemini Vision ---
+def analyze_screenshot(image_bytes: bytes, media_type: str, event_type: str = "songe") -> dict:
+    import google.generativeai as genai
 
-    text = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel("gemini-2.0-flash")
+
+    prompt = EVENTS[event_type]["prompt"]
+
+    import PIL.Image
+    import io
+    image = PIL.Image.open(io.BytesIO(image_bytes))
+
+    response = model.generate_content([prompt, image])
+    text = response.text.strip()
 
     match = re.search(r'\{.*\}', text, re.DOTALL)
     if match:
         return json.loads(match.group())
-    raise ValueError(f"Impossible de parser la réponse Gemini: {text[:200]}")
+    raise ValueError(f"Impossible de parser la réponse Gemini: {text}")
 
+# --- Check event dates ---
+def check_event_dates(event_type: str) -> str | None:
+    """Retourne un message d'erreur si hors dates, None si OK."""
+    event = EVENTS.get(event_type)
+    if not event:
+        return "❌ Événement inconnu."
+    now_paris = datetime.now(TIMEZONE)
+    start = TIMEZONE.localize(datetime.strptime(event["start"], "%Y-%m-%d"))
+    end = TIMEZONE.localize(datetime.strptime(event["end"], "%Y-%m-%d").replace(hour=23, minute=59, second=59))
+    if now_paris < start:
+        return f"❌ L'événement **{event['name']}** n'a pas encore commencé ! Début le {event['start']}."
+    if now_paris > end:
+        return f"❌ L'événement **{event['name']}** est terminé depuis le {event['end']}."
+    return None
+
+# --- Check previous record ---
+def get_previous_best(discord_id: int, event_type: str) -> tuple | None:
+    """Retourne (intensite_rank, temps_seconds) du record actuel, ou None."""
+    conn = sqlite3.connect("songe.db")
+    c = conn.cursor()
+    c.execute("""
+        SELECT r.intensite_rank, r.temps_seconds
+        FROM runs r JOIN run_players rp ON r.id = rp.run_id
+        WHERE rp.discord_id = ? AND r.event_type = ? AND r.resultat = 'Victoire'
+        ORDER BY r.intensite_rank DESC, r.temps_seconds ASC
+        LIMIT 1
+    """, (discord_id, event_type))
+    result = c.fetchone()
+    conn.close()
+    return result
 
 # --- Bot ---
 intents = discord.Intents.default()
@@ -181,41 +226,24 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
-# =====================
-# EVENTS
-# =====================
-
 @bot.event
 async def on_ready():
-    await init_db()
-    log.info(f"Bot connecté: {bot.user}")
+    init_db()
+    print(f"Bot connecté: {bot.user}")
     try:
         synced = await bot.tree.sync()
-        log.info(f"{len(synced)} commandes slash synchronisées")
+        print(f"{len(synced)} commandes slash synchronisées")
     except Exception as e:
-        log.error(f"Erreur sync: {e}")
+        print(f"Erreur sync: {e}")
 
 
-@bot.event
-async def on_command_error(ctx, error):
-    if isinstance(error, commands.CommandNotFound):
-        return
-    log.error(f"Erreur commande {ctx.command}: {error}", exc_info=error)
-    await ctx.reply("❌ Une erreur est survenue. Réessaie ou contacte un admin.")
-
-
-# =====================
-# !songe — Enregistrer une run
-# =====================
-
-@bot.command(name="songe")
-async def songe(ctx: commands.Context):
-    """!songe @joueur1 @joueur2 ... + screenshot attaché"""
-    if not is_allowed(ctx):
+# --- Commande générique pour enregistrer une run ---
+async def handle_run(ctx: commands.Context, event_type: str):
+    if ctx.channel.id != ALLOWED_CHANNEL_ID:
         return
 
     if not ctx.message.attachments:
-        await ctx.reply("❌ Attache un screenshot de fin de Songe.\nUsage: `!songe @joueur1 @joueur2` + image")
+        await ctx.reply("❌ Attache un screenshot de fin de combat.")
         return
 
     attachment = ctx.message.attachments[0]
@@ -225,20 +253,21 @@ async def songe(ctx: commands.Context):
 
     mentioned = ctx.message.mentions
     if not mentioned:
-        await ctx.reply("❌ Mentionne les joueurs du Songe.\nUsage: `!songe @joueur1 @joueur2` + image")
+        await ctx.reply(f"❌ Mentionne les joueurs. Ex: `!{event_type} @joueur1 @joueur2`")
+        return
+
+    # Vérifier les dates
+    date_error = check_event_dates(event_type)
+    if date_error:
+        await ctx.reply(date_error)
         return
 
     msg = await ctx.reply("🔍 Analyse du screenshot en cours...")
 
     try:
         image_bytes = await attachment.read()
-
-        try:
-            data = await analyze_screenshot(image_bytes)
-        except (asyncio.TimeoutError, ValueError) as e:
-            log.error(f"Erreur analyse Gemini: {e}")
-            await msg.edit(content="❌ Le bot subit un problème technique. Réessaie dans quelques minutes.")
-            return
+        media_type = attachment.content_type
+        data = analyze_screenshot(image_bytes, media_type, event_type)
 
         intensite = data.get("intensite", "Inconnu")
         temps_display = data.get("temps", "00:00")
@@ -247,474 +276,405 @@ async def songe(ctx: commands.Context):
         score = data.get("score")
         tours = data.get("tours")
         songeur = data.get("songeur")
+        date_ingame = data.get("date_ingame")
 
         intensite_rank = get_intensite_rank(intensite)
         temps_seconds = parse_time_to_seconds(temps_display)
 
-        if resultat == "Victoire":
-            async with aiosqlite.connect(DB_PATH) as db:
-                cursor = await db.execute("""
-                    INSERT INTO runs (timestamp, intensite, intensite_rank, temps_seconds, temps_display,
-                                    resultat, palier, score, tours, songeur, submitted_by)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    datetime.now(UTC).isoformat(), intensite, intensite_rank, temps_seconds,
-                    temps_display, resultat, palier, score, tours, songeur, ctx.author.id
-                ))
-                run_id = cursor.lastrowid
+        # Récupérer les records avant insertion
+        previous_bests = {}
+        for member in mentioned:
+            previous_bests[member.id] = get_previous_best(member.id, event_type)
 
-                for member in mentioned:
-                    await db.execute("INSERT OR IGNORE INTO run_players (run_id, discord_id, discord_name) VALUES (?, ?, ?)",
-                                     (run_id, member.id, member.display_name))
-                await db.commit()
+        # Sauvegarder en DB
+        conn = sqlite3.connect("songe.db")
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO runs (event_type, timestamp, intensite, intensite_rank, temps_seconds, temps_display,
+                            resultat, palier, score, tours, songeur, date_ingame, submitted_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            event_type, datetime.now(TIMEZONE).isoformat(), intensite, intensite_rank, temps_seconds,
+            temps_display, resultat, palier, score, tours, songeur, date_ingame, ctx.author.id
+        ))
+        run_id = c.lastrowid
 
+        for member in mentioned:
+            c.execute("INSERT OR IGNORE INTO run_players (run_id, discord_id, discord_name) VALUES (?, ?, ?)",
+                      (run_id, member.id, member.display_name))
+
+        conn.commit()
+        conn.close()
+
+        # Embed de réponse
+        event_name = EVENTS[event_type]["name"]
         embed = discord.Embed(
-            title=f"{'✅ Victoire — Songe enregistré' if resultat == 'Victoire' else '❌ Défaite — Non enregistré'}",
+            title=f"{'✅ Victoire' if resultat == 'Victoire' else '❌ Défaite'} — {event_name}",
             color=discord.Color.green() if resultat == "Victoire" else discord.Color.red()
         )
         embed.add_field(name="Intensité", value=intensite, inline=True)
         embed.add_field(name="Temps", value=temps_display, inline=True)
+        if palier:
+            embed.add_field(name="Palier", value=palier, inline=True)
         if tours:
             embed.add_field(name="Tours", value=str(tours), inline=True)
         if songeur:
             embed.add_field(name="Songeur", value=songeur, inline=True)
+        if date_ingame:
+            embed.add_field(name="Date in-game", value=date_ingame, inline=True)
         embed.add_field(name="Joueurs", value=" ".join(m.mention for m in mentioned), inline=False)
-        if resultat == "Victoire":
-            embed.set_footer(text=f"Run #{run_id}")
+        embed.set_footer(text=f"Run #{run_id}")
 
         await msg.edit(content=None, embed=embed)
-        log.info(f"Songe {resultat}: {intensite} par {ctx.author}" + (f" — Run #{run_id}" if resultat == "Victoire" else ""))
+
+        # Vérifier les nouveaux records
+        if resultat == "Victoire":
+            record_holders = []
+            for member in mentioned:
+                prev = previous_bests[member.id]
+                if prev is None:
+                    # Premier run victorieux
+                    record_holders.append(member)
+                else:
+                    prev_rank, prev_time = prev
+                    if intensite_rank > prev_rank or (intensite_rank == prev_rank and temps_seconds < prev_time):
+                        record_holders.append(member)
+
+            if record_holders:
+                names = ", ".join(m.mention for m in record_holders)
+                await ctx.channel.send(
+                    f"🚨 **NOUVEAU RECORD !** {names} vient(ent) de battre leur record personnel !\n"
+                    f"**{intensite}** en **{temps_display}** 🔥"
+                )
+
+            # Streak
+            for member in mentioned:
+                streak = get_streak(member.id, event_type)
+                if streak == 3:
+                    await ctx.channel.send(f"🔥🔥 {member.mention} est en série de **3 victoires** d'affilée !")
+                elif streak == 5:
+                    await ctx.channel.send(f"🔥🔥🔥 {member.mention} est **INARRÊTABLE** — **5 victoires** d'affilée !")
+                elif streak == 10:
+                    await ctx.channel.send(f"👑 {member.mention} — **10 victoires d'affilée** ! Légendaire !")
 
     except Exception as e:
-        log.error(f"Erreur commande songe: {e}", exc_info=True)
-        await msg.edit(content=f"❌ Erreur inattendue. Réessaie ou contacte un admin.")
+        await msg.edit(content=f"❌ Erreur: {e}")
 
 
-# =====================
-# !classement — Top global
-# =====================
+@bot.command(name="songe")
+async def songe(ctx: commands.Context):
+    """!songe @joueur1 @joueur2 ... + screenshot"""
+    await handle_run(ctx, "songe")
+
+
+@bot.command(name="bolgrot")
+async def bolgrot(ctx: commands.Context):
+    """!bolgrot @joueur1 @joueur2 ... + screenshot"""
+    await handle_run(ctx, "bolgrot")
+
 
 @bot.command(name="classement")
-async def classement(ctx: commands.Context):
-    """!classement — Classement des meilleurs temps par intensité."""
-    if not is_allowed(ctx):
+async def classement(ctx: commands.Context, event_type: str = "songe"):
+    """!classement [songe|bolgrot]"""
+    if ctx.channel.id != ALLOWED_CHANNEL_ID:
         return
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        rows = await db.execute_fetchall("""
-            SELECT rp.discord_id, rp.discord_name,
-                   r.intensite, r.temps_display, r.temps_seconds, r.intensite_rank, r.id
-            FROM run_players rp
-            JOIN runs r ON r.id = rp.run_id
-            WHERE r.resultat = 'Victoire'
-              AND (rp.discord_id, r.intensite_rank, r.temps_seconds) IN (
-                  SELECT rp2.discord_id, MAX(r2.intensite_rank), MIN(r2.temps_seconds)
-                  FROM run_players rp2
-                  JOIN runs r2 ON r2.id = rp2.run_id
-                  WHERE r2.resultat = 'Victoire'
-                    AND r2.intensite_rank = (
-                        SELECT MAX(r3.intensite_rank)
-                        FROM run_players rp3
-                        JOIN runs r3 ON r3.id = rp3.run_id
-                        WHERE rp3.discord_id = rp2.discord_id AND r3.resultat = 'Victoire'
-                    )
-                  GROUP BY rp2.discord_id
-              )
-            GROUP BY rp.discord_id
-            ORDER BY r.intensite_rank DESC, r.temps_seconds ASC
-            LIMIT 15
-        """)
+    if event_type not in EVENTS:
+        await ctx.reply(f"❌ Événement inconnu. Choix : {', '.join(EVENTS.keys())}")
+        return
+
+    conn = sqlite3.connect("songe.db")
+    c = conn.cursor()
+
+    c.execute("""
+        SELECT rp.discord_id, rp.discord_name,
+               r.intensite, r.temps_display, r.temps_seconds, r.intensite_rank, r.id
+        FROM run_players rp
+        JOIN runs r ON r.id = rp.run_id
+        WHERE r.resultat = 'Victoire' AND r.event_type = ?
+          AND (rp.discord_id, r.intensite_rank, r.temps_seconds) IN (
+              SELECT rp2.discord_id, MAX(r2.intensite_rank), MIN(r2.temps_seconds)
+              FROM run_players rp2
+              JOIN runs r2 ON r2.id = rp2.run_id
+              WHERE r2.resultat = 'Victoire' AND r2.event_type = ?
+                AND r2.intensite_rank = (
+                    SELECT MAX(r3.intensite_rank)
+                    FROM run_players rp3
+                    JOIN runs r3 ON r3.id = rp3.run_id
+                    WHERE rp3.discord_id = rp2.discord_id AND r3.resultat = 'Victoire' AND r3.event_type = ?
+                )
+              GROUP BY rp2.discord_id
+          )
+        GROUP BY rp.discord_id
+        ORDER BY r.intensite_rank DESC, r.temps_seconds ASC
+        LIMIT 15
+    """, (event_type, event_type, event_type))
+    rows = c.fetchall()
+    conn.close()
 
     if not rows:
         await ctx.reply("📭 Aucune run enregistrée.")
         return
 
+    event_name = EVENTS[event_type]["name"]
     embed = discord.Embed(
-        title="🏆 Classement Songe — Records personnels",
-        description="Meilleure intensité puis meilleur temps",
+        title=f"🏆 Classement {event_name}",
+        description="Meilleure intensité puis meilleur temps par joueur",
         color=discord.Color.gold()
     )
 
-    for i, row in enumerate(rows, 1):
+    for i, (did, dname, intensite, temps, _, _, run_id) in enumerate(rows, 1):
         medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"**{i}.**"
         embed.add_field(
-            name=f"{medal} {row[1]}",
-            value=f"{row[2]} — {row[3]}\n`Run #{row[6]}`",
+            name=f"{medal} {dname}",
+            value=f"{intensite} — {temps}\n`Run #{run_id}`",
             inline=False
         )
 
     await ctx.reply(embed=embed)
 
-
-# =====================
-# !top <intensité> — Classement par intensité
-# =====================
-
-@bot.command(name="top")
-async def top(ctx: commands.Context, *, intensite: str = None):
-    """!top <intensité> — Meilleurs temps sur une intensité. Ex: !top paradoxe v"""
-    if not is_allowed(ctx):
-        return
-
-    if not intensite:
-        await ctx.reply("❌ Précise l'intensité.\nEx: `!top paradoxe v`, `!top cauchemar iii`")
-        return
-
-    rank = get_intensite_rank(intensite)
-    if rank == -1:
-        valid = ", ".join(f"`{k.title()}`" for k in INTENSITE_ORDER)
-        await ctx.reply(f"❌ Intensité inconnue. Valeurs possibles:\n{valid}")
-        return
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        rows = await db.execute_fetchall("""
-            SELECT rp.discord_name, r.temps_display, r.temps_seconds, r.tours, r.id
-            FROM run_players rp
-            JOIN runs r ON r.id = rp.run_id
-            WHERE r.resultat = 'Victoire' AND r.intensite_rank = ?
-            ORDER BY r.temps_seconds ASC
-            LIMIT 10
-        """, (rank,))
-
-    if not rows:
-        await ctx.reply(f"📭 Aucune victoire en **{intensite.title()}**.")
-        return
-
-    embed = discord.Embed(
-        title=f"⚔️ Top {intensite.title()}",
-        description="Classé par temps le plus rapide",
-        color=discord.Color.purple()
-    )
-
-    for i, row in enumerate(rows, 1):
-        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"**{i}.**"
-        tours_str = f" ({row[3]} tours)" if row[3] else ""
-        embed.add_field(
-            name=f"{medal} {row[0]}",
-            value=f"{row[1]}{tours_str} — `Run #{row[4]}`",
-            inline=False
-        )
-
-    await ctx.reply(embed=embed)
-
-
-# =====================
-# !stats @joueur — Stats détaillées
-# =====================
 
 @bot.command(name="stats")
 async def stats(ctx: commands.Context):
-    """!stats @joueur — Stats d'un joueur."""
-    if not is_allowed(ctx):
+    """!stats @joueur"""
+    if ctx.channel.id != ALLOWED_CHANNEL_ID:
         return
 
     if not ctx.message.mentions:
-        await ctx.reply("❌ Mentionne un joueur.\nEx: `!stats @joueur`")
+        await ctx.reply("❌ Mentionne un joueur. Ex: `!stats @joueur`")
         return
 
     target = ctx.message.mentions[0]
+    conn = sqlite3.connect("songe.db")
+    c = conn.cursor()
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        row = await db.execute_fetchall("""
-            SELECT COUNT(*), SUM(CASE WHEN r.resultat='Victoire' THEN 1 ELSE 0 END)
-            FROM runs r JOIN run_players rp ON r.id = rp.run_id
-            WHERE rp.discord_id = ?
-        """, (target.id,))
-        total, victoires = row[0][0], row[0][1] or 0
+    # Stats globales
+    c.execute("""
+        SELECT COUNT(*), SUM(CASE WHEN r.resultat='Victoire' THEN 1 ELSE 0 END)
+        FROM runs r JOIN run_players rp ON r.id = rp.run_id
+        WHERE rp.discord_id = ?
+    """, (target.id,))
+    total, victoires = c.fetchone()
+    victoires = victoires or 0
 
-        best = await db.execute_fetchall("""
-            SELECT r.intensite, r.temps_display
-            FROM runs r JOIN run_players rp ON r.id = rp.run_id
-            WHERE rp.discord_id = ? AND r.resultat = 'Victoire'
-            ORDER BY r.intensite_rank DESC, r.temps_seconds ASC
-            LIMIT 1
-        """, (target.id,))
+    # Meilleure run toutes catégories
+    c.execute("""
+        SELECT r.intensite, r.temps_display, r.temps_seconds, r.event_type
+        FROM runs r JOIN run_players rp ON r.id = rp.run_id
+        WHERE rp.discord_id = ? AND r.resultat = 'Victoire'
+        ORDER BY r.intensite_rank DESC, r.temps_seconds ASC
+        LIMIT 1
+    """, (target.id,))
+    best = c.fetchone()
 
-        intensites = await db.execute_fetchall("""
-            SELECT r.intensite, COUNT(*)
-            FROM runs r JOIN run_players rp ON r.id = rp.run_id
-            WHERE rp.discord_id = ? AND r.resultat = 'Victoire'
-            GROUP BY r.intensite
-            ORDER BY r.intensite_rank DESC
-            LIMIT 5
-        """, (target.id,))
+    # Temps moyen
+    c.execute("""
+        SELECT AVG(r.temps_seconds)
+        FROM runs r JOIN run_players rp ON r.id = rp.run_id
+        WHERE rp.discord_id = ? AND r.resultat = 'Victoire'
+    """, (target.id,))
+    avg_time = c.fetchone()[0]
+
+    conn.close()
+
+    streak = get_streak(target.id)
+    title_str = get_title(
+        best[2] if best else 0,
+        victoires,
+        streak
+    )
 
     embed = discord.Embed(title=f"📊 Stats de {target.display_name}", color=discord.Color.blue())
-    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="Titre", value=title_str, inline=False)
     embed.add_field(name="Runs", value=str(total), inline=True)
     embed.add_field(name="Victoires", value=f"{victoires}/{total}", inline=True)
     if total > 0:
         embed.add_field(name="Winrate", value=f"{victoires/total*100:.0f}%", inline=True)
     if best:
-        embed.add_field(name="Meilleure run", value=f"{best[0][0]} en {best[0][1]}", inline=False)
-    if intensites:
-        breakdown = "\n".join(f"• {row[0]}: {row[1]} victoire{'s' if row[1] > 1 else ''}" for row in intensites)
-        embed.add_field(name="Victoires par intensité", value=breakdown, inline=False)
+        embed.add_field(name="Meilleure run", value=f"{best[0]} en {best[1]} ({best[3]})", inline=False)
+    if avg_time:
+        embed.add_field(name="Temps moyen", value=format_seconds(int(avg_time)), inline=True)
+    if streak > 0:
+        embed.add_field(name="Série actuelle", value=f"{'🔥' * min(streak, 5)} {streak} victoire(s)", inline=True)
 
     await ctx.reply(embed=embed)
 
 
-# =====================
-# !historique @joueur — Toutes les runs d'un joueur
-# =====================
-
 @bot.command(name="historique")
 async def historique(ctx: commands.Context):
-    """!historique @joueur — Les 15 dernières runs d'un joueur."""
-    if not is_allowed(ctx):
+    """!historique @joueur — Toutes les runs d'un joueur."""
+    if ctx.channel.id != ALLOWED_CHANNEL_ID:
         return
 
     if not ctx.message.mentions:
-        await ctx.reply("❌ Mentionne un joueur.\nEx: `!historique @joueur`")
+        await ctx.reply("❌ Mentionne un joueur. Ex: `!historique @joueur`")
         return
 
     target = ctx.message.mentions[0]
+    conn = sqlite3.connect("songe.db")
+    c = conn.cursor()
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        rows = await db.execute_fetchall("""
-            SELECT r.id, r.intensite, r.temps_display, r.resultat, r.tours, r.timestamp
-            FROM runs r JOIN run_players rp ON r.id = rp.run_id
-            WHERE rp.discord_id = ?
-            ORDER BY r.id DESC
-            LIMIT 15
-        """, (target.id,))
+    c.execute("""
+        SELECT r.id, r.event_type, r.intensite, r.temps_display, r.resultat, r.timestamp
+        FROM runs r JOIN run_players rp ON r.id = rp.run_id
+        WHERE rp.discord_id = ?
+        ORDER BY r.id DESC
+        LIMIT 20
+    """, (target.id,))
+    rows = c.fetchall()
+    conn.close()
 
     if not rows:
-        await ctx.reply(f"📭 Aucune run enregistrée pour {target.display_name}.")
+        await ctx.reply(f"📭 Aucune run pour {target.display_name}.")
         return
 
     embed = discord.Embed(
         title=f"📜 Historique de {target.display_name}",
-        description="15 dernières runs",
-        color=discord.Color.dark_grey()
+        description=f"Dernières {len(rows)} runs",
+        color=discord.Color.purple()
     )
 
-    for row in rows:
-        run_id, intensite, temps, resultat, tours, timestamp = row
+    for run_id, etype, intensite, temps, resultat, ts in rows:
         icon = "✅" if resultat == "Victoire" else "❌"
-        date = timestamp[:10]
-        tours_str = f" • {tours}T" if tours else ""
+        date_str = ts[:10] if ts else "?"
         embed.add_field(
-            name=f"{icon} Run #{run_id} — {date}",
-            value=f"{intensite} — {temps}{tours_str}",
+            name=f"{icon} Run #{run_id} — {etype}",
+            value=f"{intensite} — {temps} ({date_str})",
             inline=False
         )
 
     await ctx.reply(embed=embed)
 
 
-# =====================
-# !vs @joueur1 @joueur2 — Comparaison
-# =====================
-
-@bot.command(name="vs")
-async def vs(ctx: commands.Context):
-    """!vs @joueur1 @joueur2 — Compare deux joueurs."""
-    if not is_allowed(ctx):
+@bot.command(name="supprun")
+async def supprun(ctx: commands.Context, run_id: int = 0):
+    """!supprun <id> — Supprime une run (admin)."""
+    if ctx.channel.id != ALLOWED_CHANNEL_ID:
         return
 
-    mentions = ctx.message.mentions
-    if len(mentions) < 2:
-        await ctx.reply("❌ Mentionne deux joueurs.\nEx: `!vs @joueur1 @joueur2`")
+    # Vérifier que l'auteur est admin
+    is_admin = any(role.name == ADMIN_ROLE for role in ctx.author.roles) or ctx.author.guild_permissions.administrator
+    if not is_admin:
+        await ctx.reply(f"❌ Tu dois avoir le rôle **{ADMIN_ROLE}** ou être administrateur.")
         return
 
-    p1, p2 = mentions[0], mentions[1]
+    if run_id <= 0:
+        await ctx.reply("❌ Usage: `!supprun <id>` — l'ID est affiché dans le footer des résultats.")
+        return
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        async def get_player_stats(player_id):
-            row = await db.execute_fetchall("""
-                SELECT COUNT(*), SUM(CASE WHEN r.resultat='Victoire' THEN 1 ELSE 0 END)
-                FROM runs r JOIN run_players rp ON r.id = rp.run_id
-                WHERE rp.discord_id = ?
-            """, (player_id,))
-            total, wins = row[0][0], row[0][1] or 0
+    conn = sqlite3.connect("songe.db")
+    c = conn.cursor()
 
-            best = await db.execute_fetchall("""
-                SELECT r.intensite, r.temps_display, r.intensite_rank
-                FROM runs r JOIN run_players rp ON r.id = rp.run_id
-                WHERE rp.discord_id = ? AND r.resultat = 'Victoire'
-                ORDER BY r.intensite_rank DESC, r.temps_seconds ASC
-                LIMIT 1
-            """, (player_id,))
+    c.execute("SELECT id, intensite, temps_display, resultat FROM runs WHERE id = ?", (run_id,))
+    run = c.fetchone()
+    if not run:
+        conn.close()
+        await ctx.reply(f"❌ Run #{run_id} introuvable.")
+        return
 
-            return {
-                "total": total,
-                "wins": wins,
-                "winrate": f"{wins/total*100:.0f}%" if total > 0 else "N/A",
-                "best_intensite": best[0][0] if best else "—",
-                "best_temps": best[0][1] if best else "—",
-                "best_rank": best[0][2] if best else -1,
-            }
+    c.execute("DELETE FROM run_players WHERE run_id = ?", (run_id,))
+    c.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+    conn.commit()
+    conn.close()
 
-        s1 = await get_player_stats(p1.id)
-        s2 = await get_player_stats(p2.id)
+    await ctx.reply(f"🗑️ Run #{run_id} supprimée ({run[1]} — {run[2]} — {run[3]}).")
 
-    embed = discord.Embed(title=f"⚔️ {p1.display_name} vs {p2.display_name}", color=discord.Color.orange())
 
-    embed.add_field(name=p1.display_name, value=(
-        f"**Runs:** {s1['total']}\n"
-        f"**Victoires:** {s1['wins']}\n"
-        f"**Winrate:** {s1['winrate']}\n"
-        f"**Record:** {s1['best_intensite']} en {s1['best_temps']}"
-    ), inline=True)
+@bot.command(name="event")
+async def event_list(ctx: commands.Context):
+    """!event — Liste des événements."""
+    if ctx.channel.id != ALLOWED_CHANNEL_ID:
+        return
 
-    embed.add_field(name=p2.display_name, value=(
-        f"**Runs:** {s2['total']}\n"
-        f"**Victoires:** {s2['wins']}\n"
-        f"**Winrate:** {s2['winrate']}\n"
-        f"**Record:** {s2['best_intensite']} en {s2['best_temps']}"
-    ), inline=True)
+    now_paris = datetime.now(TIMEZONE)
+    embed = discord.Embed(title="📅 Événements", color=discord.Color.blue())
 
-    if s1["best_rank"] > s2["best_rank"]:
-        verdict = f"🏆 **{p1.display_name}** a la meilleure intensité !"
-    elif s2["best_rank"] > s1["best_rank"]:
-        verdict = f"🏆 **{p2.display_name}** a la meilleure intensité !"
-    else:
-        verdict = "🤝 Même niveau d'intensité !"
-    embed.add_field(name="Verdict", value=verdict, inline=False)
+    for etype, edata in EVENTS.items():
+        start = datetime.strptime(edata["start"], "%Y-%m-%d")
+        end = datetime.strptime(edata["end"], "%Y-%m-%d")
+
+        if now_paris.date() < start.date():
+            status = "⏳ À venir"
+        elif now_paris.date() > end.date():
+            status = "🏁 Terminé"
+        else:
+            status = "🟢 En cours"
+
+        # Compter les runs
+        conn = sqlite3.connect("songe.db")
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM runs WHERE event_type = ?", (etype,))
+        nb_runs = c.fetchone()[0]
+        c.execute("SELECT COUNT(DISTINCT rp.discord_id) FROM run_players rp JOIN runs r ON r.id = rp.run_id WHERE r.event_type = ?", (etype,))
+        nb_players = c.fetchone()[0]
+        conn.close()
+
+        embed.add_field(
+            name=f"{status} {edata['name']}",
+            value=f"📅 {edata['start']} → {edata['end']}\n🎮 {nb_runs} runs | 👥 {nb_players} joueurs\nCommande : `!{etype}`",
+            inline=False
+        )
 
     await ctx.reply(embed=embed)
 
 
-# =====================
-# !equipe — Classement par équipe
-# =====================
-
-@bot.command(name="equipe")
-async def equipe(ctx: commands.Context):
-    """!equipe — Classement des meilleures équipes."""
-    if not is_allowed(ctx):
+@bot.command(name="inscrits")
+async def inscrits(ctx: commands.Context):
+    """!inscrits — Liste des inscrits (réaction 🔥)."""
+    if ctx.channel.id != ALLOWED_CHANNEL_ID:
         return
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        rows = await db.execute_fetchall("""
-            SELECT r.id, r.intensite, r.temps_display, r.intensite_rank, r.temps_seconds,
-                   GROUP_CONCAT(rp.discord_name, ', ') as players
-            FROM runs r
-            JOIN run_players rp ON r.id = rp.run_id
-            WHERE r.resultat = 'Victoire'
-            GROUP BY r.id
-            ORDER BY r.intensite_rank DESC, r.temps_seconds ASC
-            LIMIT 10
-        """)
+    inscription_msg = None
+    async for message in ctx.channel.history(limit=100):
+        for reaction in message.reactions:
+            if str(reaction.emoji) == "🔥":
+                inscription_msg = message
+                break
+        if inscription_msg:
+            break
 
-    if not rows:
-        await ctx.reply("📭 Aucune victoire enregistrée.")
+    if not inscription_msg:
+        await ctx.reply("❌ Aucun message avec une réaction 🔥 trouvé dans le salon.")
+        return
+
+    reaction = None
+    for r in inscription_msg.reactions:
+        if str(r.emoji) == "🔥":
+            reaction = r
+            break
+
+    users = []
+    async for user in reaction.users():
+        if not user.bot:
+            users.append(user)
+
+    if not users:
+        await ctx.reply("📭 Aucun inscrit pour le moment.")
         return
 
     embed = discord.Embed(
-        title="👥 Classement par équipe",
-        description="Meilleures runs tous joueurs confondus",
-        color=discord.Color.teal()
+        title="🔥 Inscrits Speed Rush Songe",
+        description=f"**{len(users)} participant(s)**\n\n" + "\n".join(f"• {u.mention}" for u in users),
+        color=discord.Color.orange()
     )
-
-    for i, row in enumerate(rows, 1):
-        run_id, intensite, temps, _, _, players = row
-        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"**{i}.**"
-        embed.add_field(
-            name=f"{medal} {intensite} — {temps}",
-            value=f"{players}\n`Run #{run_id}`",
-            inline=False
-        )
-
     await ctx.reply(embed=embed)
 
-
-# =====================
-# !supprimer <id> — Supprimer une run
-# =====================
-
-@bot.command(name="supprimer")
-async def supprimer(ctx: commands.Context, run_id: int = None):
-    """!supprimer <id> — Supprime une run (admin ou auteur)."""
-    if not is_allowed(ctx):
-        return
-
-    if run_id is None:
-        await ctx.reply("❌ Précise l'ID de la run.\nEx: `!supprimer 5`")
-        return
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        row = await db.execute_fetchall("SELECT submitted_by FROM runs WHERE id = ?", (run_id,))
-        if not row:
-            await ctx.reply(f"❌ Run #{run_id} introuvable.")
-            return
-
-        if row[0][0] != ctx.author.id and not is_admin(ctx):
-            await ctx.reply("❌ Tu ne peux supprimer que tes propres runs (ou être admin).")
-            return
-
-        await db.execute("DELETE FROM run_players WHERE run_id = ?", (run_id,))
-        await db.execute("DELETE FROM runs WHERE id = ?", (run_id,))
-        await db.commit()
-
-    await ctx.reply(f"🗑️ Run #{run_id} supprimée.")
-    log.info(f"Run #{run_id} supprimée par {ctx.author}")
-
-
-# =====================
-# !reset — Reset toutes les données
-# =====================
-
-@bot.command(name="reset")
-async def reset(ctx: commands.Context):
-    """!reset — Supprime toutes les données (admin seulement)."""
-    if not is_allowed(ctx):
-        return
-
-    if not is_admin(ctx):
-        await ctx.reply(f"❌ Seuls les administrateurs ou le rôle **{ADMIN_ROLE_NAME}** peuvent reset.")
-        return
-
-    if not hasattr(reset, "_pending") or reset._pending != ctx.author.id:
-        reset._pending = ctx.author.id
-        await ctx.reply("⚠️ Es-tu sûr ? **Toutes les runs seront supprimées.** Retape `!reset` pour confirmer.")
-        return
-
-    reset._pending = None
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM run_players")
-        await db.execute("DELETE FROM runs")
-        await db.execute("DELETE FROM sqlite_sequence WHERE name IN ('runs',)")
-        await db.commit()
-
-    await ctx.reply("🗑️ Toutes les données ont été supprimées. Le classement repart à zéro.")
-    log.info(f"Reset complet par {ctx.author}")
-
-
-# =====================
-# !aide — Liste des commandes
-# =====================
 
 @bot.command(name="aide")
 async def aide(ctx: commands.Context):
-    """!aide — Affiche toutes les commandes disponibles."""
-    if not is_allowed(ctx):
+    """!aide — Liste des commandes."""
+    if ctx.channel.id != ALLOWED_CHANNEL_ID:
         return
 
     embed = discord.Embed(
-        title="🔥 Pyrosonge — Commandes",
-        color=discord.Color.orange()
+        title="🤖 Pyrosonge — Commandes",
+        color=discord.Color.dark_gold()
     )
-    embed.add_field(name="📸 Enregistrer", value=(
-        "`!songe @joueur1 @joueur2` + screenshot\nAnalyse et enregistre une run"
-    ), inline=False)
-    embed.add_field(name="🏆 Classements", value=(
-        "`!classement` — Records personnels\n"
-        "`!top <intensité>` — Top par intensité\n"
-        "`!equipe` — Meilleures équipes"
-    ), inline=False)
-    embed.add_field(name="📊 Joueurs", value=(
-        "`!stats @joueur` — Stats détaillées\n"
-        "`!historique @joueur` — 15 dernières runs\n"
-        "`!vs @joueur1 @joueur2` — Comparaison"
-    ), inline=False)
-    embed.add_field(name="🔧 Admin", value=(
-        "`!supprimer <id>` — Supprimer une run\n"
-        "`!reset` — Tout supprimer (admin)"
-    ), inline=False)
+    embed.add_field(name="📸 Enregistrer une run", value="`!songe @joueurs` + screenshot\n`!bolgrot @joueurs` + screenshot", inline=False)
+    embed.add_field(name="🏆 Classements", value="`!classement` — classement Songe\n`!classement bolgrot` — classement Bolgrot", inline=False)
+    embed.add_field(name="📊 Stats", value="`!stats @joueur` — stats d'un joueur\n`!historique @joueur` — historique des runs", inline=False)
+    embed.add_field(name="📅 Événements", value="`!event` — événements en cours\n`!inscrits` — liste des inscrits", inline=False)
+    embed.add_field(name="🔧 Admin", value=f"`!supprun <id>` — supprimer une run (rôle {ADMIN_ROLE})", inline=False)
 
     await ctx.reply(embed=embed)
 

@@ -94,6 +94,10 @@ def init_db():
         c.execute("ALTER TABLE runs ADD COLUMN date_ingame TEXT")
     except:
         pass
+    try:
+        c.execute("ALTER TABLE runs ADD COLUMN message_id INTEGER")
+    except:
+        pass
     conn.commit()
     conn.close()
 
@@ -326,6 +330,13 @@ async def handle_run(ctx: commands.Context, event_type: str):
         embed.set_footer(text=f"Run #{run_id}")
 
         await msg.edit(content=None, embed=embed)
+
+        # Stocker le message_id pour suppression par reply
+        conn = sqlite3.connect("songe.db")
+        c = conn.cursor()
+        c.execute("UPDATE runs SET message_id = ? WHERE id = ?", (msg.id, run_id))
+        conn.commit()
+        conn.close()
 
         # Vérifier les nouveaux records
         if resultat == "Victoire":
@@ -575,8 +586,8 @@ async def reset(ctx: commands.Context):
 
 
 @bot.command(name="supprun")
-async def supprun(ctx: commands.Context, run_id: int = 0):
-    """!supprun <id> — Supprime une run (admin)."""
+async def supprun(ctx: commands.Context):
+    """!supprun — Réponds au message d'une run pour la supprimer (admin)."""
     if ctx.channel.id != ALLOWED_CHANNEL_ID:
         return
 
@@ -586,20 +597,25 @@ async def supprun(ctx: commands.Context, run_id: int = 0):
         await ctx.reply(f"❌ Tu dois avoir le rôle **{ADMIN_ROLE}** ou être administrateur.")
         return
 
-    if run_id <= 0:
-        await ctx.reply("❌ Usage: `!supprun <id>` — l'ID est affiché dans le footer des résultats.")
+    # Vérifier que c'est une réponse à un message
+    ref = ctx.message.reference
+    if not ref or not ref.message_id:
+        await ctx.reply("❌ Réponds au message de la run que tu veux supprimer avec `!supprun`.")
         return
+
+    target_msg_id = ref.message_id
 
     conn = sqlite3.connect("songe.db")
     c = conn.cursor()
 
-    c.execute("SELECT id, intensite, temps_display, resultat FROM runs WHERE id = ?", (run_id,))
+    c.execute("SELECT id, intensite, temps_display, resultat FROM runs WHERE message_id = ?", (target_msg_id,))
     run = c.fetchone()
     if not run:
         conn.close()
-        await ctx.reply(f"❌ Run #{run_id} introuvable.")
+        await ctx.reply("❌ Aucune run liée à ce message.")
         return
 
+    run_id = run[0]
     c.execute("DELETE FROM run_players WHERE run_id = ?", (run_id,))
     c.execute("DELETE FROM runs WHERE id = ?", (run_id,))
     conn.commit()
@@ -702,7 +718,7 @@ async def aide(ctx: commands.Context):
     embed.add_field(name="🏆 Classements", value="`!classement` — classement Songe\n`!classement bolgrot` — classement Bolgrot", inline=False)
     embed.add_field(name="📊 Stats", value="`!stats @joueur` — stats d'un joueur\n`!historique @joueur` — historique des runs", inline=False)
     embed.add_field(name="📅 Événements", value="`!event` — événements en cours\n`!inscrits` — liste des inscrits", inline=False)
-    embed.add_field(name="🔧 Admin", value=f"`!supprun <id>` — supprimer une run\n`!reset` — réinitialiser toutes les runs\n(rôle {ADMIN_ROLE} requis)", inline=False)
+    embed.add_field(name="🔧 Admin", value=f"**Répondre** au message d'une run + `!supprun` — supprimer cette run\n`!reset` — réinitialiser toutes les runs\n(rôle {ADMIN_ROLE} requis)", inline=False)
 
     await ctx.reply(embed=embed)
 

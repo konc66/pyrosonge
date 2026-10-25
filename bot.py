@@ -627,12 +627,6 @@ async def supprun(ctx: commands.Context):
     if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
-    # Vérifier que l'auteur est admin
-    is_admin = any(role.name == ADMIN_ROLE for role in ctx.author.roles) or ctx.author.guild_permissions.administrator
-    if not is_admin:
-        await ctx.reply(f"❌ Tu dois avoir le rôle **{ADMIN_ROLE}** ou être administrateur.")
-        return
-
     # Vérifier que c'est une réponse à un message
     ref = ctx.message.reference
     if not ref or not ref.message_id:
@@ -644,7 +638,7 @@ async def supprun(ctx: commands.Context):
     conn = sqlite3.connect("songe.db")
     c = conn.cursor()
 
-    c.execute("SELECT id, intensite, temps_display, resultat FROM runs WHERE message_id = ?", (target_msg_id,))
+    c.execute("SELECT id, intensite, temps_display, resultat, submitted_by FROM runs WHERE message_id = ?", (target_msg_id,))
     run = c.fetchone()
     if not run:
         conn.close()
@@ -652,6 +646,13 @@ async def supprun(ctx: commands.Context):
         return
 
     run_id = run[0]
+    submitted_by = run[4]
+
+    # Autoriser si admin OU auteur de la run
+    is_admin = any(role.name == ADMIN_ROLE for role in ctx.author.roles) or ctx.author.guild_permissions.administrator
+    if not is_admin and ctx.author.id != submitted_by:
+        await ctx.reply("❌ Tu peux supprimer uniquement tes propres runs (ou être **PyroAdmin**).")
+        return
     c.execute("DELETE FROM run_players WHERE run_id = ?", (run_id,))
     c.execute("DELETE FROM runs WHERE id = ?", (run_id,))
     conn.commit()

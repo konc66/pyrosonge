@@ -9,6 +9,13 @@ import json
 from datetime import datetime
 import pytz
 
+# Charger .env si présent (local), sinon utilise les variables système (Railway)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # --- Config ---
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
@@ -284,6 +291,16 @@ async def handle_run(ctx: commands.Context, event_type: str):
 
         intensite_rank = get_intensite_rank(intensite)
         temps_seconds = parse_time_to_seconds(temps_display)
+
+        # Vérifier que la date in-game est visible (obligatoire pour songe)
+        if event_type == "songe" and (not date_ingame or date_ingame.lower() in ["null", "none", ""]):
+            await msg.edit(
+                content="❌ **Run refusée** — La date et l'heure in-game ne sont pas visibles sur le screenshot.\n\n"
+                        "📋 **Règle** : tu dois avoir le `/time` ou `/whois` visible dans le tchat en bas de ton écran "
+                        "pour prouver que la run a été faite pendant la période de l'événement (26/10 → 01/11).\n\n"
+                        "👉 Refais un screen avec la date visible et retente !"
+            )
+            return
 
         # Récupérer les records avant insertion
         previous_bests = {}

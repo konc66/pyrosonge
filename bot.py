@@ -201,7 +201,7 @@ def analyze_screenshot(image_bytes: bytes, media_type: str, event_type: str = "s
         key_index = (_current_key_index + attempt) % len(GEMINI_API_KEYS)
         try:
             genai.configure(api_key=GEMINI_API_KEYS[key_index])
-            model = genai.GenerativeModel("gemini-2.0-flash")
+            model = genai.GenerativeModel("gemini-3.8-flash")
             response = model.generate_content([prompt, image])
             text = response.text.strip()
             _current_key_index = key_index  # garder la clé qui marche

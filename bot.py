@@ -18,9 +18,17 @@ except ImportError:
 
 # --- Config ---
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
-ALLOWED_CHANNEL_ID = int(os.environ["ALLOWED_CHANNEL_ID"])
-ADMIN_ROLE = os.environ.get("ADMIN_ROLE", "PyroAdmin")  # rôle autorisé à reset/supprimer des runs
+
+# Support multi-clés Gemini (rotation si quota dépassé)
+_gemini_keys_raw = os.environ.get("GEMINI_API_KEYS", os.environ.get("GEMINI_API_KEY", ""))
+GEMINI_API_KEYS = [k.strip() for k in _gemini_keys_raw.split(",") if k.strip()]
+_current_key_index = 0
+
+# Support multi-channels
+_channels_raw = os.environ.get("ALLOWED_CHANNEL_IDS", os.environ.get("ALLOWED_CHANNEL_ID", ""))
+ALLOWED_CHANNEL_IDS = [int(c.strip()) for c in _channels_raw.split(",") if c.strip()]
+
+ADMIN_ROLE = os.environ.get("ADMIN_ROLE_NAME", os.environ.get("ADMIN_ROLE", "PyroAdmin"))
 TIMEZONE = pytz.timezone("Europe/Paris")
 
 # --- Events config ---
@@ -179,24 +187,35 @@ def get_streak(discord_id: int, event_type: str = "songe") -> int:
 
 # --- Gemini Vision ---
 def analyze_screenshot(image_bytes: bytes, media_type: str, event_type: str = "songe") -> dict:
+    global _current_key_index
     import google.generativeai as genai
-
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("gemini-2.0-flash")
-
-    prompt = EVENTS[event_type]["prompt"]
-
     import PIL.Image
     import io
+
+    prompt = EVENTS[event_type]["prompt"]
     image = PIL.Image.open(io.BytesIO(image_bytes))
 
-    response = model.generate_content([prompt, image])
-    text = response.text.strip()
-
-    match = re.search(r'\{.*\}', text, re.DOTALL)
-    if match:
-        return json.loads(match.group())
-    raise ValueError(f"Impossible de parser la réponse Gemini: {text}")
+    # Rotation des clés Gemini en cas d'erreur quota
+    last_error = None
+    for attempt in range(len(GEMINI_API_KEYS)):
+        key_index = (_current_key_index + attempt) % len(GEMINI_API_KEYS)
+        try:
+            genai.configure(api_key=GEMINI_API_KEYS[key_index])
+            model = genai.GenerativeModel("gemini-2.0-flash")
+            response = model.generate_content([prompt, image])
+            text = response.text.strip()
+            _current_key_index = key_index  # garder la clé qui marche
+            match = re.search(r'\{.*\}', text, re.DOTALL)
+            if match:
+                return json.loads(match.group())
+            raise ValueError(f"Impossible de parser la réponse Gemini: {text}")
+        except Exception as e:
+            last_error = e
+            if "quota" in str(e).lower() or "429" in str(e) or "resource" in str(e).lower():
+                _current_key_index = (key_index + 1) % len(GEMINI_API_KEYS)
+                continue
+            raise
+    raise last_error
 
 # --- Check event dates ---
 def check_event_dates(event_type: str) -> str | None:
@@ -250,7 +269,7 @@ async def on_ready():
 
 # --- Commande générique pour enregistrer une run ---
 async def handle_run(ctx: commands.Context, event_type: str):
-    if ctx.channel.id != ALLOWED_CHANNEL_ID:
+    if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
     if not ctx.message.attachments:
@@ -404,7 +423,7 @@ async def bolgrot(ctx: commands.Context):
 @bot.command(name="classement")
 async def classement(ctx: commands.Context, event_type: str = "songe"):
     """!classement [songe|bolgrot]"""
-    if ctx.channel.id != ALLOWED_CHANNEL_ID:
+    if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
     if event_type not in EVENTS:
@@ -465,7 +484,7 @@ async def classement(ctx: commands.Context, event_type: str = "songe"):
 @bot.command(name="stats")
 async def stats(ctx: commands.Context):
     """!stats @joueur"""
-    if ctx.channel.id != ALLOWED_CHANNEL_ID:
+    if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
     if not ctx.message.mentions:
@@ -531,7 +550,7 @@ async def stats(ctx: commands.Context):
 @bot.command(name="historique")
 async def historique(ctx: commands.Context):
     """!historique @joueur — Toutes les runs d'un joueur."""
-    if ctx.channel.id != ALLOWED_CHANNEL_ID:
+    if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
     if not ctx.message.mentions:
@@ -579,7 +598,7 @@ reset_pending = {}
 @bot.command(name="reset")
 async def reset(ctx: commands.Context):
     """!reset — Réinitialise toutes les runs (admin, double confirmation)."""
-    if ctx.channel.id != ALLOWED_CHANNEL_ID:
+    if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
     is_admin = any(role.name == ADMIN_ROLE for role in ctx.author.roles) or ctx.author.guild_permissions.administrator
@@ -605,7 +624,7 @@ async def reset(ctx: commands.Context):
 @bot.command(name="supprun")
 async def supprun(ctx: commands.Context):
     """!supprun — Réponds au message d'une run pour la supprimer (admin)."""
-    if ctx.channel.id != ALLOWED_CHANNEL_ID:
+    if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
     # Vérifier que l'auteur est admin
@@ -644,7 +663,7 @@ async def supprun(ctx: commands.Context):
 @bot.command(name="event")
 async def event_list(ctx: commands.Context):
     """!event — Liste des événements."""
-    if ctx.channel.id != ALLOWED_CHANNEL_ID:
+    if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
     now_paris = datetime.now(TIMEZONE)
@@ -682,7 +701,7 @@ async def event_list(ctx: commands.Context):
 @bot.command(name="inscrits")
 async def inscrits(ctx: commands.Context):
     """!inscrits — Liste des inscrits (réaction 🔥)."""
-    if ctx.channel.id != ALLOWED_CHANNEL_ID:
+    if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
     inscription_msg = None
@@ -724,7 +743,7 @@ async def inscrits(ctx: commands.Context):
 @bot.command(name="aide")
 async def aide(ctx: commands.Context):
     """!aide — Liste des commandes."""
-    if ctx.channel.id != ALLOWED_CHANNEL_ID:
+    if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
     embed = discord.Embed(

@@ -760,9 +760,74 @@ async def aide(ctx: commands.Context):
     embed.add_field(name="🏆 Classements", value="`!classement` — classement Songe\n`!classement bolgrot` — classement Bolgrot", inline=False)
     embed.add_field(name="📊 Stats", value="`!stats @joueur` — stats d'un joueur\n`!historique @joueur` — historique des runs", inline=False)
     embed.add_field(name="📅 Événements", value="`!event` — événements en cours\n`!inscrits` — liste des inscrits", inline=False)
-    embed.add_field(name="🔧 Admin", value=f"**Répondre** au message d'une run + `!supprun` — supprimer cette run\n`!reset` — réinitialiser toutes les runs\n(rôle {ADMIN_ROLE} requis)", inline=False)
+    embed.add_field(name="🔧 Admin", value=f"**Répondre** au message d'une run + `!supprun` — supprimer cette run\n`!reset` — réinitialiser toutes les runs\n`!backup` — sauvegarder la base\n`!restore` — restaurer depuis un backup\n(rôle {ADMIN_ROLE} requis)", inline=False)
 
     await ctx.reply(embed=embed)
+
+
+@bot.command(name="backup")
+async def backup(ctx: commands.Context):
+    """!backup — Sauvegarde la DB en fichier sur Discord (admin)."""
+    if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
+        return
+
+    is_admin = any(role.name == ADMIN_ROLE for role in ctx.author.roles) or ctx.author.guild_permissions.administrator
+    if not is_admin:
+        await ctx.reply(f"❌ Tu dois avoir le rôle **{ADMIN_ROLE}** ou être administrateur.")
+        return
+
+    try:
+        await ctx.reply(
+            "💾 **Backup de la base de données**\nGarde ce fichier précieusement ! Utilise `!restore` en répondant à ce message pour restaurer.",
+            file=discord.File("songe.db", filename="songe_backup.db")
+        )
+    except Exception as e:
+        await ctx.reply(f"❌ Erreur backup: {e}")
+
+
+@bot.command(name="restore")
+async def restore(ctx: commands.Context):
+    """!restore — Restaure la DB depuis un backup (admin). Réponds au message du backup."""
+    if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
+        return
+
+    is_admin = any(role.name == ADMIN_ROLE for role in ctx.author.roles) or ctx.author.guild_permissions.administrator
+    if not is_admin:
+        await ctx.reply(f"❌ Tu dois avoir le rôle **{ADMIN_ROLE}** ou être administrateur.")
+        return
+
+    # Chercher le fichier : soit en pièce jointe directe, soit dans le message répondu
+    attachment = None
+    if ctx.message.attachments:
+        attachment = ctx.message.attachments[0]
+    elif ctx.message.reference and ctx.message.reference.message_id:
+        try:
+            ref_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+            if ref_msg.attachments:
+                attachment = ref_msg.attachments[0]
+        except:
+            pass
+
+    if not attachment or not attachment.filename.endswith(".db"):
+        await ctx.reply("❌ Réponds au message du backup (celui avec le fichier `.db`) avec `!restore`, ou attache directement le fichier.")
+        return
+
+    try:
+        db_bytes = await attachment.read()
+        with open("songe.db", "wb") as f:
+            f.write(db_bytes)
+        # Réinitialiser la DB pour appliquer les migrations
+        init_db()
+        conn = sqlite3.connect("songe.db")
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM runs")
+        nb_runs = c.fetchone()[0]
+        c.execute("SELECT COUNT(DISTINCT rp.discord_id) FROM run_players rp")
+        nb_players = c.fetchone()[0]
+        conn.close()
+        await ctx.reply(f"✅ **Base restaurée !** {nb_runs} runs, {nb_players} joueurs récupérés.")
+    except Exception as e:
+        await ctx.reply(f"❌ Erreur restore: {e}")
 
 
 bot.run(DISCORD_TOKEN)

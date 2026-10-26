@@ -195,26 +195,31 @@ def analyze_screenshot(image_bytes: bytes, media_type: str, event_type: str = "s
     prompt = EVENTS[event_type]["prompt"]
     image = PIL.Image.open(io.BytesIO(image_bytes))
 
-    # Rotation des clés Gemini en cas d'erreur quota
+    # Rotation clés + modèles Gemini (quota/dispo)
+    MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"]
     last_error = None
-    for attempt in range(len(GEMINI_API_KEYS)):
-        key_index = (_current_key_index + attempt) % len(GEMINI_API_KEYS)
-        try:
-            genai.configure(api_key=GEMINI_API_KEYS[key_index])
-            model = genai.GenerativeModel("gemini-3.8-flash")
-            response = model.generate_content([prompt, image])
-            text = response.text.strip()
-            _current_key_index = key_index  # garder la clé qui marche
-            match = re.search(r'\{.*\}', text, re.DOTALL)
-            if match:
-                return json.loads(match.group())
-            raise ValueError(f"Impossible de parser la réponse Gemini: {text}")
-        except Exception as e:
-            last_error = e
-            if "quota" in str(e).lower() or "429" in str(e) or "resource" in str(e).lower():
-                _current_key_index = (key_index + 1) % len(GEMINI_API_KEYS)
-                continue
-            raise
+    for model_name in MODELS:
+        for attempt in range(len(GEMINI_API_KEYS)):
+            key_index = (_current_key_index + attempt) % len(GEMINI_API_KEYS)
+            try:
+                genai.configure(api_key=GEMINI_API_KEYS[key_index])
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content([prompt, image])
+                text = response.text.strip()
+                _current_key_index = key_index
+                match = re.search(r'\{.*\}', text, re.DOTALL)
+                if match:
+                    return json.loads(match.group())
+                raise ValueError(f"Impossible de parser la réponse Gemini: {text}")
+            except Exception as e:
+                last_error = e
+                err_str = str(e).lower()
+                if "quota" in err_str or "429" in str(e) or "resource" in err_str:
+                    _current_key_index = (key_index + 1) % len(GEMINI_API_KEYS)
+                    continue
+                if "404" in str(e) or "not found" in err_str or "not available" in err_str:
+                    break  # modèle indispo, passer au suivant
+                raise
     raise last_error
 
 # --- Check event dates ---

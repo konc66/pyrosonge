@@ -196,7 +196,7 @@ def analyze_screenshot(image_bytes: bytes, media_type: str, event_type: str = "s
     image = PIL.Image.open(io.BytesIO(image_bytes))
 
     # Rotation clés + modèles Gemini (quota/dispo)
-    MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
+    MODELS = ["gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-3.8-flash"]
     last_error = None
     for model_name in MODELS:
         for attempt in range(len(GEMINI_API_KEYS)):

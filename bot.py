@@ -238,27 +238,25 @@ def check_event_dates(event_type: str) -> str | None:
     return None
 
 # --- Check previous record ---
-def get_previous_best(discord_id: int, event_type: str) -> tuple | None:
-    """Retourne (intensite_rank, temps_seconds) du record actuel, ou None."""
+def get_previous_best_time(discord_id: int, event_type: str) -> int | None:
+    """Retourne le meilleur temps (en secondes) du joueur, ou None si aucune victoire."""
     conn = sqlite3.connect("songe.db")
     c = conn.cursor()
     c.execute("""
-        SELECT r.intensite_rank, r.temps_seconds
+        SELECT MIN(r.temps_seconds)
         FROM runs r JOIN run_players rp ON r.id = rp.run_id
         WHERE rp.discord_id = ? AND r.event_type = ? AND r.resultat = 'Victoire'
-        ORDER BY r.intensite_rank DESC, r.temps_seconds ASC
-        LIMIT 1
     """, (discord_id, event_type))
     result = c.fetchone()
     conn.close()
-    return result
+    return result[0] if result and result[0] is not None else None
 
 # --- Bot ---
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="/", intents=intents)
 
 
 @bot.event
@@ -288,7 +286,7 @@ async def handle_run(ctx: commands.Context, event_type: str):
 
     mentioned = ctx.message.mentions
     if not mentioned:
-        await ctx.reply(f"❌ Mentionne les joueurs. Ex: `!{event_type} @joueur1 @joueur2`")
+        await ctx.reply(f"❌ Mentionne les joueurs. Ex: `/{event_type} @joueur1 @joueur2`")
         return
 
     # Vérifier les dates
@@ -326,10 +324,10 @@ async def handle_run(ctx: commands.Context, event_type: str):
             )
             return
 
-        # Récupérer les records avant insertion
-        previous_bests = {}
+        # Récupérer les meilleurs temps avant insertion
+        previous_best_times = {}
         for member in mentioned:
-            previous_bests[member.id] = get_previous_best(member.id, event_type)
+            previous_best_times[member.id] = get_previous_best_time(member.id, event_type)
 
         # Sauvegarder en DB
         conn = sqlite3.connect("songe.db")
@@ -379,35 +377,22 @@ async def handle_run(ctx: commands.Context, event_type: str):
         conn.commit()
         conn.close()
 
-        # Vérifier les nouveaux records
+        # Vérifier les nouveaux records de temps
         if resultat == "Victoire":
             record_holders = []
             for member in mentioned:
-                prev = previous_bests[member.id]
-                if prev is None:
-                    # Premier run victorieux
+                prev_time = previous_best_times[member.id]
+                if prev_time is not None and temps_seconds < prev_time:
                     record_holders.append(member)
-                else:
-                    prev_rank, prev_time = prev
-                    if intensite_rank > prev_rank or (intensite_rank == prev_rank and temps_seconds < prev_time):
-                        record_holders.append(member)
 
             if record_holders:
-                names = ", ".join(m.mention for m in record_holders)
-                await ctx.channel.send(
-                    f"🚨 **NOUVEAU RECORD !** {names} vient(ent) de battre leur record personnel !\n"
-                    f"**{intensite}** en **{temps_display}** 🔥"
-                )
-
-            # Streak
-            for member in mentioned:
-                streak = get_streak(member.id, event_type)
-                if streak == 3:
-                    await ctx.channel.send(f"🔥🔥 {member.mention} est en série de **3 victoires** d'affilée !")
-                elif streak == 5:
-                    await ctx.channel.send(f"🔥🔥🔥 {member.mention} est **INARRÊTABLE** — **5 victoires** d'affilée !")
-                elif streak == 10:
-                    await ctx.channel.send(f"👑 {member.mention} — **10 victoires d'affilée** ! Légendaire !")
+                if len(record_holders) == 1:
+                    names = record_holders[0].mention
+                    msg_record = f"🚨 **NOUVEAU RECORD !** {names} vient de battre son record personnel ! **{temps_display}** 🔥"
+                else:
+                    names = ", ".join(m.mention for m in record_holders)
+                    msg_record = f"🚨 **NOUVEAU RECORD !** {names} viennent de battre leur record personnel ! **{temps_display}** 🔥"
+                await ctx.channel.send(msg_record)
 
     except Exception as e:
         await msg.edit(content=f"❌ Erreur: {e}")
@@ -415,19 +400,19 @@ async def handle_run(ctx: commands.Context, event_type: str):
 
 @bot.command(name="songe")
 async def songe(ctx: commands.Context):
-    """!songe @joueur1 @joueur2 ... + screenshot"""
+    """/songe @joueur1 @joueur2 ... + screenshot"""
     await handle_run(ctx, "songe")
 
 
 @bot.command(name="bolgrot")
 async def bolgrot(ctx: commands.Context):
-    """!bolgrot @joueur1 @joueur2 ... + screenshot"""
+    """/bolgrot @joueur1 @joueur2 ... + screenshot"""
     await handle_run(ctx, "bolgrot")
 
 
 @bot.command(name="classement")
 async def classement(ctx: commands.Context, event_type: str = "songe"):
-    """!classement [songe|bolgrot]"""
+    """/classement [songe|bolgrot]"""
     if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
@@ -488,12 +473,12 @@ async def classement(ctx: commands.Context, event_type: str = "songe"):
 
 @bot.command(name="stats")
 async def stats(ctx: commands.Context):
-    """!stats @joueur"""
+    """/stats @joueur"""
     if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
     if not ctx.message.mentions:
-        await ctx.reply("❌ Mentionne un joueur. Ex: `!stats @joueur`")
+        await ctx.reply("❌ Mentionne un joueur. Ex: `/stats @joueur`")
         return
 
     target = ctx.message.mentions[0]
@@ -554,12 +539,12 @@ async def stats(ctx: commands.Context):
 
 @bot.command(name="historique")
 async def historique(ctx: commands.Context):
-    """!historique @joueur — Toutes les runs d'un joueur."""
+    """/historique @joueur — Toutes les runs d'un joueur."""
     if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
     if not ctx.message.mentions:
-        await ctx.reply("❌ Mentionne un joueur. Ex: `!historique @joueur`")
+        await ctx.reply("❌ Mentionne un joueur. Ex: `/historique @joueur`")
         return
 
     target = ctx.message.mentions[0]
@@ -602,7 +587,7 @@ reset_pending = {}
 
 @bot.command(name="reset")
 async def reset(ctx: commands.Context):
-    """!reset — Réinitialise toutes les runs (admin, double confirmation)."""
+    """/reset — Réinitialise toutes les runs (admin, double confirmation)."""
     if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
@@ -623,19 +608,19 @@ async def reset(ctx: commands.Context):
         await ctx.reply("🗑️ **Toutes les runs ont été supprimées.** Base remise à zéro.")
     else:
         reset_pending[ctx.author.id] = True
-        await ctx.reply("⚠️ Es-tu sûr ? **Toutes les runs seront supprimées.** Retape `!reset` pour confirmer.")
+        await ctx.reply("⚠️ Es-tu sûr ? **Toutes les runs seront supprimées.** Retape `/reset` pour confirmer.")
 
 
 @bot.command(name="supprun")
 async def supprun(ctx: commands.Context):
-    """!supprun — Réponds au message d'une run pour la supprimer (admin)."""
+    """/supprun — Réponds au message d'une run pour la supprimer (admin)."""
     if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
     # Vérifier que c'est une réponse à un message
     ref = ctx.message.reference
     if not ref or not ref.message_id:
-        await ctx.reply("❌ Réponds au message de la run que tu veux supprimer avec `!supprun`.")
+        await ctx.reply("❌ Réponds au message de la run que tu veux supprimer avec `/supprun`.")
         return
 
     target_msg_id = ref.message_id
@@ -668,7 +653,7 @@ async def supprun(ctx: commands.Context):
 
 @bot.command(name="event")
 async def event_list(ctx: commands.Context):
-    """!event — Liste des événements."""
+    """/event — Liste des événements."""
     if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
@@ -697,7 +682,7 @@ async def event_list(ctx: commands.Context):
 
         embed.add_field(
             name=f"{status} {edata['name']}",
-            value=f"📅 {edata['start']} → {edata['end']}\n🎮 {nb_runs} runs | 👥 {nb_players} joueurs\nCommande : `!{etype}`",
+            value=f"📅 {edata['start']} → {edata['end']}\n🎮 {nb_runs} runs | 👥 {nb_players} joueurs\nCommande : `/{etype}`",
             inline=False
         )
 
@@ -706,7 +691,7 @@ async def event_list(ctx: commands.Context):
 
 @bot.command(name="inscrits")
 async def inscrits(ctx: commands.Context):
-    """!inscrits — Liste des inscrits (réaction 🔥)."""
+    """/inscrits — Liste des inscrits (réaction 🔥)."""
     if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
@@ -748,7 +733,7 @@ async def inscrits(ctx: commands.Context):
 
 @bot.command(name="aide")
 async def aide(ctx: commands.Context):
-    """!aide — Liste des commandes."""
+    """/aide — Liste des commandes."""
     if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
@@ -756,18 +741,18 @@ async def aide(ctx: commands.Context):
         title="🤖 Pyrosonge — Commandes",
         color=discord.Color.dark_gold()
     )
-    embed.add_field(name="📸 Enregistrer une run", value="`!songe @joueurs` + screenshot\n`!bolgrot @joueurs` + screenshot", inline=False)
-    embed.add_field(name="🏆 Classements", value="`!classement` — classement Songe\n`!classement bolgrot` — classement Bolgrot", inline=False)
-    embed.add_field(name="📊 Stats", value="`!stats @joueur` — stats d'un joueur\n`!historique @joueur` — historique des runs", inline=False)
-    embed.add_field(name="📅 Événements", value="`!event` — événements en cours\n`!inscrits` — liste des inscrits", inline=False)
-    embed.add_field(name="🔧 Admin", value=f"**Répondre** au message d'une run + `!supprun` — supprimer cette run\n`!reset` — réinitialiser toutes les runs\n`!backup` — sauvegarder la base\n`!restore` — restaurer depuis un backup\n(rôle {ADMIN_ROLE} requis)", inline=False)
+    embed.add_field(name="📸 Enregistrer une run", value="`/songe @joueurs` + screenshot\n`/bolgrot @joueurs` + screenshot", inline=False)
+    embed.add_field(name="🏆 Classements", value="`/classement` — classement Songe\n`/classement bolgrot` — classement Bolgrot", inline=False)
+    embed.add_field(name="📊 Stats", value="`/stats @joueur` — stats d'un joueur\n`/historique @joueur` — historique des runs", inline=False)
+    embed.add_field(name="📅 Événements", value="`/event` — événements en cours\n`/inscrits` — liste des inscrits", inline=False)
+    embed.add_field(name="🔧 Admin", value=f"**Répondre** au message d'une run + `/supprun` — supprimer cette run\n`/reset` — réinitialiser toutes les runs\n`/backup` — sauvegarder la base\n`/restore` — restaurer depuis un backup\n(rôle {ADMIN_ROLE} requis)", inline=False)
 
     await ctx.reply(embed=embed)
 
 
 @bot.command(name="backup")
 async def backup(ctx: commands.Context):
-    """!backup — Sauvegarde la DB en fichier sur Discord (admin)."""
+    """/backup — Sauvegarde la DB en fichier sur Discord (admin)."""
     if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
@@ -778,7 +763,7 @@ async def backup(ctx: commands.Context):
 
     try:
         await ctx.reply(
-            "💾 **Backup de la base de données**\nGarde ce fichier précieusement ! Utilise `!restore` en répondant à ce message pour restaurer.",
+            "💾 **Backup de la base de données**\nGarde ce fichier précieusement ! Utilise `/restore` en répondant à ce message pour restaurer.",
             file=discord.File("songe.db", filename="songe_backup.db")
         )
     except Exception as e:
@@ -787,7 +772,7 @@ async def backup(ctx: commands.Context):
 
 @bot.command(name="restore")
 async def restore(ctx: commands.Context):
-    """!restore — Restaure la DB depuis un backup (admin). Réponds au message du backup."""
+    """/restore — Restaure la DB depuis un backup (admin). Réponds au message du backup."""
     if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
@@ -809,7 +794,7 @@ async def restore(ctx: commands.Context):
             pass
 
     if not attachment or not attachment.filename.endswith(".db"):
-        await ctx.reply("❌ Réponds au message du backup (celui avec le fichier `.db`) avec `!restore`, ou attache directement le fichier.")
+        await ctx.reply("❌ Réponds au message du backup (celui avec le fichier `.db`) avec `/restore`, ou attache directement le fichier.")
         return
 
     try:

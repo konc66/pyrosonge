@@ -256,7 +256,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix="/", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents)
 
 
 @bot.event
@@ -286,7 +286,7 @@ async def handle_run(ctx: commands.Context, event_type: str):
 
     mentioned = ctx.message.mentions
     if not mentioned:
-        await ctx.reply(f"❌ Mentionne les joueurs. Ex: `/{event_type} @joueur1 @joueur2`")
+        await ctx.reply(f"❌ Mentionne les joueurs. Ex: `!{event_type} @joueur1 @joueur2`")
         return
 
     # Vérifier les dates
@@ -400,19 +400,19 @@ async def handle_run(ctx: commands.Context, event_type: str):
 
 @bot.command(name="songe")
 async def songe(ctx: commands.Context):
-    """/songe @joueur1 @joueur2 ... + screenshot"""
+    """!songe @joueur1 @joueur2 ... + screenshot"""
     await handle_run(ctx, "songe")
 
 
 @bot.command(name="bolgrot")
 async def bolgrot(ctx: commands.Context):
-    """/bolgrot @joueur1 @joueur2 ... + screenshot"""
+    """!bolgrot @joueur1 @joueur2 ... + screenshot"""
     await handle_run(ctx, "bolgrot")
 
 
 @bot.command(name="classement")
 async def classement(ctx: commands.Context, event_type: str = "songe"):
-    """/classement [songe|bolgrot]"""
+    """!classement [songe|bolgrot]"""
     if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
@@ -473,12 +473,12 @@ async def classement(ctx: commands.Context, event_type: str = "songe"):
 
 @bot.command(name="stats")
 async def stats(ctx: commands.Context):
-    """/stats @joueur"""
+    """!stats @joueur"""
     if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
     if not ctx.message.mentions:
-        await ctx.reply("❌ Mentionne un joueur. Ex: `/stats @joueur`")
+        await ctx.reply("❌ Mentionne un joueur. Ex: `!stats @joueur`")
         return
 
     target = ctx.message.mentions[0]
@@ -539,12 +539,12 @@ async def stats(ctx: commands.Context):
 
 @bot.command(name="historique")
 async def historique(ctx: commands.Context):
-    """/historique @joueur — Toutes les runs d'un joueur."""
+    """!historique @joueur — Toutes les runs d'un joueur."""
     if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
     if not ctx.message.mentions:
-        await ctx.reply("❌ Mentionne un joueur. Ex: `/historique @joueur`")
+        await ctx.reply("❌ Mentionne un joueur. Ex: `!historique @joueur`")
         return
 
     target = ctx.message.mentions[0]
@@ -587,7 +587,7 @@ reset_pending = {}
 
 @bot.command(name="reset")
 async def reset(ctx: commands.Context):
-    """/reset — Réinitialise toutes les runs (admin, double confirmation)."""
+    """!reset — Réinitialise toutes les runs (admin, double confirmation)."""
     if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
@@ -608,19 +608,19 @@ async def reset(ctx: commands.Context):
         await ctx.reply("🗑️ **Toutes les runs ont été supprimées.** Base remise à zéro.")
     else:
         reset_pending[ctx.author.id] = True
-        await ctx.reply("⚠️ Es-tu sûr ? **Toutes les runs seront supprimées.** Retape `/reset` pour confirmer.")
+        await ctx.reply("⚠️ Es-tu sûr ? **Toutes les runs seront supprimées.** Retape `!reset` pour confirmer.")
 
 
 @bot.command(name="supprun")
 async def supprun(ctx: commands.Context):
-    """/supprun — Réponds au message d'une run pour la supprimer (admin)."""
+    """!supprun — Réponds au message d'une run pour la supprimer (admin)."""
     if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
     # Vérifier que c'est une réponse à un message
     ref = ctx.message.reference
     if not ref or not ref.message_id:
-        await ctx.reply("❌ Réponds au message de la run que tu veux supprimer avec `/supprun`.")
+        await ctx.reply("❌ Réponds au message de la run que tu veux supprimer avec `!supprun`.")
         return
 
     target_msg_id = ref.message_id
@@ -653,7 +653,7 @@ async def supprun(ctx: commands.Context):
 
 @bot.command(name="event")
 async def event_list(ctx: commands.Context):
-    """/event — Liste des événements."""
+    """!event — Liste des événements."""
     if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
@@ -682,7 +682,7 @@ async def event_list(ctx: commands.Context):
 
         embed.add_field(
             name=f"{status} {edata['name']}",
-            value=f"📅 {edata['start']} → {edata['end']}\n🎮 {nb_runs} runs | 👥 {nb_players} joueurs\nCommande : `/{etype}`",
+            value=f"📅 {edata['start']} → {edata['end']}\n🎮 {nb_runs} runs | 👥 {nb_players} joueurs\nCommande : `!{etype}`",
             inline=False
         )
 
@@ -691,7 +691,7 @@ async def event_list(ctx: commands.Context):
 
 @bot.command(name="inscrits")
 async def inscrits(ctx: commands.Context):
-    """/inscrits — Liste des inscrits (réaction 🔥)."""
+    """!inscrits — Liste des inscrits (réaction 🔥)."""
     if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
@@ -733,7 +733,7 @@ async def inscrits(ctx: commands.Context):
 
 @bot.command(name="aide")
 async def aide(ctx: commands.Context):
-    """/aide — Liste des commandes."""
+    """!aide — Liste des commandes."""
     if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
@@ -741,18 +741,18 @@ async def aide(ctx: commands.Context):
         title="🤖 Pyrosonge — Commandes",
         color=discord.Color.dark_gold()
     )
-    embed.add_field(name="📸 Enregistrer une run", value="`/songe @joueurs` + screenshot\n`/bolgrot @joueurs` + screenshot", inline=False)
-    embed.add_field(name="🏆 Classements", value="`/classement` — classement Songe\n`/classement bolgrot` — classement Bolgrot", inline=False)
-    embed.add_field(name="📊 Stats", value="`/stats @joueur` — stats d'un joueur\n`/historique @joueur` — historique des runs", inline=False)
-    embed.add_field(name="📅 Événements", value="`/event` — événements en cours\n`/inscrits` — liste des inscrits", inline=False)
-    embed.add_field(name="🔧 Admin", value=f"**Répondre** au message d'une run + `/supprun` — supprimer cette run\n`/reset` — réinitialiser toutes les runs\n`/backup` — sauvegarder la base\n`/restore` — restaurer depuis un backup\n(rôle {ADMIN_ROLE} requis)", inline=False)
+    embed.add_field(name="📸 Enregistrer une run", value="`!songe @joueurs` + screenshot\n`!bolgrot @joueurs` + screenshot", inline=False)
+    embed.add_field(name="🏆 Classements", value="`!classement` — classement Songe\n`!classement bolgrot` — classement Bolgrot", inline=False)
+    embed.add_field(name="📊 Stats", value="`!stats @joueur` — stats d'un joueur\n`!historique @joueur` — historique des runs", inline=False)
+    embed.add_field(name="📅 Événements", value="`!event` — événements en cours\n`!inscrits` — liste des inscrits", inline=False)
+    embed.add_field(name="🔧 Admin", value=f"**Répondre** au message d'une run + `!supprun` — supprimer cette run\n`!reset` — réinitialiser toutes les runs\n`!backup` — sauvegarder la base\n`!restore` — restaurer depuis un backup\n(rôle {ADMIN_ROLE} requis)", inline=False)
 
     await ctx.reply(embed=embed)
 
 
 @bot.command(name="backup")
 async def backup(ctx: commands.Context):
-    """/backup — Sauvegarde la DB en fichier sur Discord (admin)."""
+    """!backup — Sauvegarde la DB en fichier sur Discord (admin)."""
     if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
@@ -763,7 +763,7 @@ async def backup(ctx: commands.Context):
 
     try:
         await ctx.reply(
-            "💾 **Backup de la base de données**\nGarde ce fichier précieusement ! Utilise `/restore` en répondant à ce message pour restaurer.",
+            "💾 **Backup de la base de données**\nGarde ce fichier précieusement ! Utilise `!restore` en répondant à ce message pour restaurer.",
             file=discord.File("songe.db", filename="songe_backup.db")
         )
     except Exception as e:
@@ -772,7 +772,7 @@ async def backup(ctx: commands.Context):
 
 @bot.command(name="restore")
 async def restore(ctx: commands.Context):
-    """/restore — Restaure la DB depuis un backup (admin). Réponds au message du backup."""
+    """!restore — Restaure la DB depuis un backup (admin). Réponds au message du backup."""
     if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
         return
 
@@ -794,7 +794,7 @@ async def restore(ctx: commands.Context):
             pass
 
     if not attachment or not attachment.filename.endswith(".db"):
-        await ctx.reply("❌ Réponds au message du backup (celui avec le fichier `.db`) avec `/restore`, ou attache directement le fichier.")
+        await ctx.reply("❌ Réponds au message du backup (celui avec le fichier `.db`) avec `!restore`, ou attache directement le fichier.")
         return
 
     try:

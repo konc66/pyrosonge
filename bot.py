@@ -627,7 +627,7 @@ def _get_channels_info():
                 "**Commandes disponibles ici :**\n"
                 f"🎰 `!slots <mise>` — Machine à sous ({SLOTS_MIN_BET}-{SLOTS_MAX_BET} {FLAMTON})\n"
                 f"{FLAMTON} `!coinflip @joueur <mise>` — Pile ou face PvP (10-{COINFLIP_MAX_BET} {FLAMTON})\n"
-                f"🎡 `!roulette <mise> <choix>` — Roulette ({ROULETTE_MIN_BET}-{ROULETTE_MAX_BET} {FLAMTON})\n"
+                f"🎡 `!roulette <mise> <choix>` — Roulette multi-mise ({ROULETTE_MIN_BET}-{ROULETTE_MAX_BET} {FLAMTON})\n"
                 f"💰 `!solde` — Voir ton solde\n"
                 f"🏆 `!classement-coins` — Top 15 des fortunes\n\n"
                 f"🚫 Toute tentative de génération abusive de {FLAMTON} (AFK, exploit, multicompte...) sera sanctionnée."
@@ -1425,6 +1425,7 @@ SLOT_PAYOUTS = {"💎": 20, "⭐": 8, "🔥": 4, "🌱": 2, "💀": 0}
 ROULETTE_NUMBERS = list(range(0, 37))  # 0-36
 ROULETTE_REDS = {1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36}
 ROULETTE_BLACKS = {2,4,6,8,10,11,13,15,17,20,22,24,26,28,29,31,33,35}
+roulette_history = []
 
 
 def spin_slots():
@@ -1623,117 +1624,184 @@ async def coinflip(ctx: commands.Context, target: discord.Member = None, mise: i
     await flip_msg.edit(content=None, embed=embed)
 
 
+def _roulette_color(num):
+    if num in ROULETTE_REDS:
+        return "🔴", "Rouge"
+    if num in ROULETTE_BLACKS:
+        return "⚫", "Noir"
+    return "🟢", "Vert"
+
+
+def _parse_roulette_bet(choix_str, mise, result_num):
+    is_red = result_num in ROULETTE_REDS
+    is_black = result_num in ROULETTE_BLACKS
+    choix_str = choix_str.lower().strip()
+
+    if choix_str.isdigit() and 0 <= int(choix_str) <= 36:
+        won = int(choix_str) == result_num
+        return f"Numéro {choix_str}", mise * 35 if won else 0, "x35"
+    bets = {
+        "rouge": ("Rouge", is_red, 2, "x2"),
+        "noir": ("Noir", is_black, 2, "x2"),
+        "pair": ("Pair", result_num != 0 and result_num % 2 == 0, 2, "x2"),
+        "impair": ("Impair", result_num % 2 == 1, 2, "x2"),
+        "1-18": ("1-18", 1 <= result_num <= 18, 2, "x2"),
+        "19-36": ("19-36", 19 <= result_num <= 36, 2, "x2"),
+        "douzaine1": ("Douzaine 1 (1-12)", 1 <= result_num <= 12, 3, "x3"),
+        "douzaine2": ("Douzaine 2 (13-24)", 13 <= result_num <= 24, 3, "x3"),
+        "douzaine3": ("Douzaine 3 (25-36)", 25 <= result_num <= 36, 3, "x3"),
+    }
+    if choix_str in bets:
+        desc, won, mult, mult_txt = bets[choix_str]
+        return desc, mise * mult if won else 0, mult_txt
+    return None, 0, ""
+
+
+def _roulette_history_line():
+    if not roulette_history:
+        return ""
+    items = []
+    for num in roulette_history[-10:]:
+        emoji, _ = _roulette_color(num)
+        items.append(f"{emoji}{num}")
+    return "📊 **Historique :** " + " ".join(items)
+
+
+def _roulette_board(highlight=None):
+    rows = [
+        [3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36],
+        [2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35],
+        [1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31, 34],
+    ]
+    lines = ["```"]
+    lines.append("┌────────────────────────────────────────┐")
+    lines.append("│  0  │                                  │")
+    lines.append("├─────┼──────────────────────────────────┤")
+    for row in rows:
+        cells = []
+        for n in row:
+            marker = "▶" if n == highlight else ("●" if n in ROULETTE_REDS else "○")
+            cells.append(f"{marker}{n:2d}")
+        lines.append("│     │" + " ".join(cells) + "│")
+    lines.append("└─────┴──────────────────────────────────┘")
+    lines.append("```")
+    return "\n".join(lines)
+
+
 @bot.command(name="roulette")
 async def roulette(ctx: commands.Context, mise: int = 0, *, choix: str = ""):
-    """!roulette <mise> <choix> — Roulette de casino."""
+    """!roulette <mise> <choix> — Roulette de casino. Multi-mise possible."""
     if CASINO_CHANNEL_ID and ctx.channel.id != CASINO_CHANNEL_ID:
         return
     if not mise or not choix:
+        history = _roulette_history_line()
         await ctx.reply(
-            f"❌ Usage : `!roulette <mise> <choix>`\n\n"
+            f"❌ Usage : `!roulette <mise> <choix>` (multi-mise : sépare par virgule)\n\n"
             f"**Choix possibles :**\n"
             f"• Un numéro (0-36) → paye **x35**\n"
             f"• `rouge` ou `noir` → paye **x2**\n"
             f"• `pair` ou `impair` → paye **x2**\n"
             f"• `1-18` ou `19-36` → paye **x2**\n"
             f"• `douzaine1`, `douzaine2`, `douzaine3` → paye **x3**\n\n"
-            f"Mise : {ROULETTE_MIN_BET}-{ROULETTE_MAX_BET} {FLAMTON}"
+            f"**Multi-mise :** `!roulette 50 rouge, pair, 17`\n"
+            f"Mise : {ROULETTE_MIN_BET}-{ROULETTE_MAX_BET} {FLAMTON}\n\n"
+            + (history if history else "")
         )
         return
     if mise < ROULETTE_MIN_BET or mise > ROULETTE_MAX_BET:
         await ctx.reply(f"❌ Mise entre **{ROULETTE_MIN_BET}** et **{ROULETTE_MAX_BET}** {FLAMTON}")
         return
-    balance = get_balance(ctx.author.id)
-    if balance < mise:
-        await ctx.reply(f"❌ Solde insuffisant. Tu as **{balance}** {FLAMTON}")
-        return
-    choix = choix.lower().strip()
-    result_num = random.choice(ROULETTE_NUMBERS)
-    is_red = result_num in ROULETTE_REDS
-    is_black = result_num in ROULETTE_BLACKS
-    color_emoji = "🔴" if is_red else "⚫" if is_black else "🟢"
-    color_name = "Rouge" if is_red else "Noir" if is_black else "Vert"
 
-    payout = 0
-    bet_desc = ""
-
-    # Numéro exact
-    if choix.isdigit() and 0 <= int(choix) <= 36:
-        bet_desc = f"Numéro {choix}"
-        if int(choix) == result_num:
-            payout = mise * 35
-    elif choix == "rouge":
-        bet_desc = "Rouge"
-        if is_red:
-            payout = mise * 2
-    elif choix == "noir":
-        bet_desc = "Noir"
-        if is_black:
-            payout = mise * 2
-    elif choix == "pair":
-        bet_desc = "Pair"
-        if result_num != 0 and result_num % 2 == 0:
-            payout = mise * 2
-    elif choix == "impair":
-        bet_desc = "Impair"
-        if result_num % 2 == 1:
-            payout = mise * 2
-    elif choix == "1-18":
-        bet_desc = "1-18"
-        if 1 <= result_num <= 18:
-            payout = mise * 2
-    elif choix == "19-36":
-        bet_desc = "19-36"
-        if 19 <= result_num <= 36:
-            payout = mise * 2
-    elif choix == "douzaine1":
-        bet_desc = "Douzaine 1 (1-12)"
-        if 1 <= result_num <= 12:
-            payout = mise * 3
-    elif choix == "douzaine2":
-        bet_desc = "Douzaine 2 (13-24)"
-        if 13 <= result_num <= 24:
-            payout = mise * 3
-    elif choix == "douzaine3":
-        bet_desc = "Douzaine 3 (25-36)"
-        if 25 <= result_num <= 36:
-            payout = mise * 3
-    else:
+    bet_parts = [b.strip() for b in choix.split(",") if b.strip()]
+    if not bet_parts:
         await ctx.reply("❌ Choix invalide. Tape `!roulette` pour voir les options.")
         return
 
-    add_coins(ctx.author.id, -mise)
+    total_mise = mise * len(bet_parts)
+    balance = get_balance(ctx.author.id)
+    if balance < total_mise:
+        await ctx.reply(f"❌ Solde insuffisant. {len(bet_parts)} mise(s) × {mise} = **{total_mise}** {FLAMTON}, tu as **{balance}** {FLAMTON}")
+        return
 
-    msg = await ctx.reply("🎡 La roulette tourne...")
-    fake_nums = random.sample([n for n in ROULETTE_NUMBERS if n != result_num], 4)
-    for i, fake in enumerate(fake_nums):
-        fake_red = fake in ROULETTE_REDS
-        fake_emoji = "🔴" if fake_red else "⚫" if fake in ROULETTE_BLACKS else "🟢"
-        await asyncio.sleep(0.6)
-        await msg.edit(content=f"🎡 La bille rebondit... {fake_emoji} **{fake}** ?")
-    await asyncio.sleep(0.8)
-    await msg.edit(content=f"🎡 La bille ralentit... {color_emoji} **{result_num}** !")
+    result_num = random.choice(ROULETTE_NUMBERS)
+    bets_resolved = []
+    for part in bet_parts:
+        desc, payout, mult_txt = _parse_roulette_bet(part, mise, result_num)
+        if desc is None:
+            await ctx.reply(f"❌ Choix invalide : `{part}`. Tape `!roulette` pour voir les options.")
+            return
+        bets_resolved.append((desc, payout, mult_txt))
+
+    add_coins(ctx.author.id, -total_mise)
+    color_emoji, color_name = _roulette_color(result_num)
+
+    board = _roulette_board()
+    msg = await ctx.reply(f"🎡 **La roulette tourne...**\n{board}")
+
+    fake_nums = random.sample([n for n in ROULETTE_NUMBERS if n != result_num], 5)
+    for fake in fake_nums:
+        f_emoji, _ = _roulette_color(fake)
+        await asyncio.sleep(0.5)
+        await msg.edit(content=f"🎡 La bille rebondit... {f_emoji} **{fake}** ?\n{_roulette_board(fake)}")
+
+    await asyncio.sleep(0.6)
+    await msg.edit(content=f"🎡 La bille ralentit... {color_emoji} **{result_num}** !\n{_roulette_board(result_num)}")
     await asyncio.sleep(1.0)
 
-    if payout > 0:
-        add_coins(ctx.author.id, payout)
-        gain = payout - mise
-        embed = discord.Embed(title="🎡 Roulette", color=discord.Color.green())
-        embed.description = (
-            f"{color_emoji} **{result_num}** — {color_name}\n\n"
-            f"Mise : {bet_desc}\n"
-            f"✅ **Gagné ! +{gain}** {FLAMTON}"
-        )
+    roulette_history.append(result_num)
+    if len(roulette_history) > 20:
+        roulette_history.pop(0)
+
+    total_payout = sum(p for _, p, _ in bets_resolved)
+    total_gain = total_payout - total_mise
+
+    if total_payout > 0:
+        add_coins(ctx.author.id, total_payout)
+
+    bet_lines = []
+    for desc, payout, mult_txt in bets_resolved:
+        if payout > 0:
+            bet_lines.append(f"✅ {desc} ({mult_txt}) → **+{payout - mise}** {FLAMTON}")
+        else:
+            bet_lines.append(f"❌ {desc} ({mult_txt}) → **-{mise}** {FLAMTON}")
+
+    if total_gain > 0:
+        embed = discord.Embed(title="🎡 Roulette — Gagné !", color=discord.Color.green())
+    elif total_gain == 0:
+        embed = discord.Embed(title="🎡 Roulette — Neutre", color=discord.Color.gold())
     else:
-        embed = discord.Embed(title="🎡 Roulette", color=discord.Color.red())
-        embed.description = (
-            f"{color_emoji} **{result_num}** — {color_name}\n\n"
-            f"Mise : {bet_desc}\n"
-            f"❌ **Perdu ! -{mise}** {FLAMTON}"
-        )
+        embed = discord.Embed(title="🎡 Roulette — Perdu", color=discord.Color.red())
+
+    result_props = []
+    if result_num != 0:
+        result_props.append(color_name)
+        result_props.append("Pair" if result_num % 2 == 0 else "Impair")
+        if result_num <= 18:
+            result_props.append("1-18")
+        else:
+            result_props.append("19-36")
+        if result_num <= 12:
+            result_props.append("Douz.1")
+        elif result_num <= 24:
+            result_props.append("Douz.2")
+        else:
+            result_props.append("Douz.3")
+
+    props_txt = " • ".join(result_props) if result_props else "Zéro"
+
+    embed.description = (
+        f"{color_emoji} **{result_num}** — {props_txt}\n\n"
+        + "\n".join(bet_lines)
+        + f"\n\n{'🏆' if total_gain > 0 else '💸'} **Bilan : {'+' if total_gain >= 0 else ''}{total_gain}** {FLAMTON}"
+    )
 
     new_balance = get_balance(ctx.author.id)
-    embed.description += f"\n\n💰 Solde : **{new_balance}** {FLAMTON}"
+    embed.description += f"\n💰 Solde : **{new_balance}** {FLAMTON}"
+
+    history_txt = _roulette_history_line()
+    if history_txt:
+        embed.description += f"\n\n{history_txt}"
+
     await msg.edit(content=None, embed=embed)
 
 
@@ -2746,9 +2814,6 @@ async def restore(ctx: commands.Context):
 @bot.command(name="purge")
 async def purge(ctx: commands.Context, id_debut: int = 0, id_fin: int = 0):
     """!purge <id_debut> <id_fin> — Supprime les messages entre deux IDs (admin)."""
-    if ctx.channel.id not in ALLOWED_CHANNEL_IDS and ctx.channel.id != BACKUP_CHANNEL_ID:
-        return
-
     is_admin = any(role.name == ADMIN_ROLE for role in ctx.author.roles) or ctx.author.guild_permissions.administrator
     if not is_admin:
         await ctx.reply(f"❌ Tu dois avoir le rôle **{ADMIN_ROLE}** ou être administrateur.")

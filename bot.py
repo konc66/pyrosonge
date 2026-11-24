@@ -125,7 +125,7 @@ Réponds UNIQUEMENT avec le JSON, rien d'autre.""",
 
 # --- DB ---
 def init_db():
-    conn = sqlite3.connect("songe.db")
+    conn = sqlite3.connect("save.db")
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS runs (
@@ -275,7 +275,7 @@ def get_title(temps_seconds: int, victoires: int, streak: int) -> str:
     return " | ".join(titles) if titles else "🌱 Débutant"
 
 def get_streak(discord_id: int, event_type: str = "songe") -> int:
-    conn = sqlite3.connect("songe.db")
+    conn = sqlite3.connect("save.db")
     c = conn.cursor()
     c.execute("""
         SELECT r.resultat FROM runs r
@@ -347,7 +347,7 @@ def check_event_dates(event_type: str) -> str | None:
 # --- Check previous record ---
 def get_previous_best_time(discord_id: int, event_type: str) -> int | None:
     """Retourne le meilleur temps (en secondes) du joueur, ou None si aucune victoire."""
-    conn = sqlite3.connect("songe.db")
+    conn = sqlite3.connect("save.db")
     c = conn.cursor()
     c.execute("""
         SELECT MIN(r.temps_seconds)
@@ -360,7 +360,7 @@ def get_previous_best_time(discord_id: int, event_type: str) -> int | None:
 
 # --- Wallet helpers ---
 def get_balance(discord_id: int) -> int:
-    conn = sqlite3.connect("songe.db")
+    conn = sqlite3.connect("save.db")
     c = conn.cursor()
     c.execute("SELECT balance FROM wallets WHERE discord_id = ?", (discord_id,))
     row = c.fetchone()
@@ -369,7 +369,7 @@ def get_balance(discord_id: int) -> int:
 
 
 def add_coins(discord_id: int, amount: int) -> int:
-    conn = sqlite3.connect("songe.db")
+    conn = sqlite3.connect("save.db")
     c = conn.cursor()
     c.execute("INSERT INTO wallets (discord_id, balance) VALUES (?, ?) ON CONFLICT(discord_id) DO UPDATE SET balance = balance + ?",
               (discord_id, max(amount, 0), amount))
@@ -382,7 +382,7 @@ def add_coins(discord_id: int, amount: int) -> int:
 
 def get_daily_earned(discord_id: int) -> int:
     today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
-    conn = sqlite3.connect("songe.db")
+    conn = sqlite3.connect("save.db")
     c = conn.cursor()
     c.execute("SELECT earned FROM coin_daily WHERE discord_id = ? AND date = ?", (discord_id, today))
     row = c.fetchone()
@@ -392,7 +392,7 @@ def get_daily_earned(discord_id: int) -> int:
 
 def add_daily_earned(discord_id: int, amount: int):
     today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
-    conn = sqlite3.connect("songe.db")
+    conn = sqlite3.connect("save.db")
     c = conn.cursor()
     c.execute("INSERT INTO coin_daily (discord_id, date, earned) VALUES (?, ?, ?) ON CONFLICT(discord_id, date) DO UPDATE SET earned = earned + ?",
               (discord_id, today, amount, amount))
@@ -403,7 +403,7 @@ def add_daily_earned(discord_id: int, amount: int):
 # --- Casino loss tracking ---
 def get_daily_loss(discord_id: int) -> int:
     today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
-    conn = sqlite3.connect("songe.db")
+    conn = sqlite3.connect("save.db")
     c = conn.cursor()
     c.execute("SELECT lost FROM casino_daily_loss WHERE discord_id = ? AND date = ?", (discord_id, today))
     row = c.fetchone()
@@ -413,7 +413,7 @@ def get_daily_loss(discord_id: int) -> int:
 
 def add_daily_loss(discord_id: int, amount: int):
     today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
-    conn = sqlite3.connect("songe.db")
+    conn = sqlite3.connect("save.db")
     c = conn.cursor()
     c.execute("INSERT INTO casino_daily_loss (discord_id, date, lost) VALUES (?, ?, ?) ON CONFLICT(discord_id, date) DO UPDATE SET lost = lost + ?",
               (discord_id, today, amount, amount))
@@ -424,7 +424,7 @@ def add_daily_loss(discord_id: int, amount: int):
 # --- Donation tracking ---
 def get_daily_donated(discord_id: int) -> int:
     today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
-    conn = sqlite3.connect("songe.db")
+    conn = sqlite3.connect("save.db")
     c = conn.cursor()
     c.execute("SELECT donated FROM don_daily WHERE discord_id = ? AND date = ?", (discord_id, today))
     row = c.fetchone()
@@ -434,7 +434,7 @@ def get_daily_donated(discord_id: int) -> int:
 
 def add_daily_donated(discord_id: int, amount: int):
     today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
-    conn = sqlite3.connect("songe.db")
+    conn = sqlite3.connect("save.db")
     c = conn.cursor()
     c.execute("INSERT INTO don_daily (discord_id, date, donated) VALUES (?, ?, ?) ON CONFLICT(discord_id, date) DO UPDATE SET donated = donated + ?",
               (discord_id, today, amount, amount))
@@ -444,7 +444,7 @@ def add_daily_donated(discord_id: int, amount: int):
 
 # --- Role/shop helpers ---
 def get_user_discount(discord_id: int) -> float:
-    conn = sqlite3.connect("songe.db")
+    conn = sqlite3.connect("save.db")
     c = conn.cursor()
     now = datetime.now(TIMEZONE).isoformat()
     c.execute("SELECT role_key FROM active_roles WHERE discord_id = ? AND expires_at > ?", (discord_id, now))
@@ -465,7 +465,7 @@ def apply_discount(base_price: int, discord_id: int) -> tuple[int, float]:
 
 
 def has_active_item(discord_id: int, item_type: str) -> bool:
-    conn = sqlite3.connect("songe.db")
+    conn = sqlite3.connect("save.db")
     c = conn.cursor()
     now = datetime.now(TIMEZONE).isoformat()
     c.execute("SELECT 1 FROM active_items WHERE discord_id = ? AND item_type = ? AND expires_at > ?",
@@ -477,7 +477,7 @@ def has_active_item(discord_id: int, item_type: str) -> bool:
 
 def add_active_item(discord_id: int, item_type: str, data: str, hours: int):
     expires = (datetime.now(TIMEZONE) + timedelta(hours=hours)).isoformat()
-    conn = sqlite3.connect("songe.db")
+    conn = sqlite3.connect("save.db")
     c = conn.cursor()
     c.execute("INSERT INTO active_items (discord_id, item_type, data, expires_at) VALUES (?, ?, ?, ?)",
               (discord_id, item_type, data, expires))
@@ -560,12 +560,12 @@ async def auto_restore():
                 if message.author != bot.user:
                     continue
                 for att in message.attachments:
-                    if att.filename == "songe.db":
+                    if att.filename in ("save.db", "songe.db"):
                         print(f"[AUTO-RESTORE] Backup trouvé dans #{channel.name} ({att.filename}, {att.size} bytes)")
                         db_bytes = await att.read()
-                        with open("songe.db", "wb") as f:
+                        with open("save.db", "wb") as f:
                             f.write(db_bytes)
-                        conn_test = sqlite3.connect("songe.db")
+                        conn_test = sqlite3.connect("save.db")
                         conn_test.execute("SELECT count(*) FROM runs")
                         conn_test.close()
                         print("[AUTO-RESTORE] Base restaurée avec succès.")
@@ -585,12 +585,12 @@ async def auto_backup(source_channel):
     try:
         old_backups = []
         async for message in target.history(limit=200):
-            if message.author == bot.user and any(att.filename == "songe.db" for att in message.attachments):
+            if message.author == bot.user and any(att.filename in ("save.db", "songe.db") for att in message.attachments):
                 old_backups.append(message)
 
         await target.send(
             "💾 Backup auto",
-            file=discord.File("songe.db", filename="songe.db")
+            file=discord.File("save.db", filename="save.db")
         )
 
         for old_msg in old_backups:
@@ -621,7 +621,7 @@ async def before_periodic_backup():
 
 async def first_boot_intro():
     """Envoie un message d'intro dans chaque salon dédié — une seule fois, jamais après."""
-    conn = sqlite3.connect("songe.db")
+    conn = sqlite3.connect("save.db")
     c = conn.cursor()
     c.execute("SELECT value FROM bot_meta WHERE key='first_boot_done'")
     row = c.fetchone()
@@ -848,7 +848,7 @@ async def before_vocal_coin_tick():
 @tasks.loop(hours=1)
 async def check_expired_roles():
     now = datetime.now(TIMEZONE).isoformat()
-    conn = sqlite3.connect("songe.db")
+    conn = sqlite3.connect("save.db")
     c = conn.cursor()
     c.execute("SELECT discord_id, role_key FROM active_roles WHERE expires_at <= ?", (now,))
     expired = c.fetchall()
@@ -937,7 +937,7 @@ async def handle_run(ctx: commands.Context, event_type: str):
             previous_best_times[member.id] = get_previous_best_time(member.id, event_type)
 
         # Sauvegarder en DB
-        conn = sqlite3.connect("songe.db")
+        conn = sqlite3.connect("save.db")
         c = conn.cursor()
         c.execute("""
             INSERT INTO runs (event_type, timestamp, intensite, intensite_rank, temps_seconds, temps_display,
@@ -994,7 +994,7 @@ async def handle_run(ctx: commands.Context, event_type: str):
         await msg.edit(content=None, embed=embed)
 
         # Stocker le message_id pour suppression par reply
-        conn = sqlite3.connect("songe.db")
+        conn = sqlite3.connect("save.db")
         c = conn.cursor()
         c.execute("UPDATE runs SET message_id = ? WHERE id = ?", (msg.id, run_id))
         conn.commit()
@@ -1076,7 +1076,7 @@ async def classement(ctx: commands.Context, event_type: str = "songe"):
         await ctx.reply(f"❌ Événement inconnu. Choix : {', '.join(EVENTS.keys())}")
         return
 
-    conn = sqlite3.connect("songe.db")
+    conn = sqlite3.connect("save.db")
     c = conn.cursor()
 
     c.execute("""
@@ -1138,7 +1138,7 @@ async def stats(ctx: commands.Context):
         return
 
     target = ctx.message.mentions[0]
-    conn = sqlite3.connect("songe.db")
+    conn = sqlite3.connect("save.db")
     c = conn.cursor()
 
     # Stats globales
@@ -1204,7 +1204,7 @@ async def historique(ctx: commands.Context):
         return
 
     target = ctx.message.mentions[0]
-    conn = sqlite3.connect("songe.db")
+    conn = sqlite3.connect("save.db")
     c = conn.cursor()
 
     c.execute("""
@@ -1254,7 +1254,7 @@ async def reset(ctx: commands.Context):
 
     if reset_pending.get(ctx.author.id):
         # Deuxième !reset = confirmation
-        conn = sqlite3.connect("songe.db")
+        conn = sqlite3.connect("save.db")
         c = conn.cursor()
         c.execute("DELETE FROM run_players")
         c.execute("DELETE FROM runs")
@@ -1281,7 +1281,7 @@ async def supprun(ctx: commands.Context):
 
     target_msg_id = ref.message_id
 
-    conn = sqlite3.connect("songe.db")
+    conn = sqlite3.connect("save.db")
     c = conn.cursor()
 
     c.execute("SELECT id, intensite, temps_display, resultat, submitted_by FROM runs WHERE message_id = ?", (target_msg_id,))
@@ -1328,7 +1328,7 @@ async def event_list(ctx: commands.Context):
             status = "🟢 En cours"
 
         # Compter les runs
-        conn = sqlite3.connect("songe.db")
+        conn = sqlite3.connect("save.db")
         c = conn.cursor()
         c.execute("SELECT COUNT(*) FROM runs WHERE event_type = ?", (etype,))
         nb_runs = c.fetchone()[0]
@@ -1433,7 +1433,7 @@ async def classement_coins(ctx: commands.Context):
     if CASINO_CHANNEL_ID and ctx.channel.id != CASINO_CHANNEL_ID:
         if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
             return
-    conn = sqlite3.connect("songe.db")
+    conn = sqlite3.connect("save.db")
     c = conn.cursor()
     c.execute("SELECT discord_id, balance FROM wallets WHERE balance > 0 ORDER BY balance DESC LIMIT 15")
     rows = c.fetchall()
@@ -1759,7 +1759,7 @@ async def buy(ctx: commands.Context, *, args: str = ""):
 
         add_coins(ctx.author.id, -price)
         expires = (datetime.now(TIMEZONE) + timedelta(days=info["days"])).isoformat()
-        conn = sqlite3.connect("songe.db")
+        conn = sqlite3.connect("save.db")
         c = conn.cursor()
         c.execute("INSERT INTO active_roles (discord_id, role_key, expires_at) VALUES (?, ?, ?) ON CONFLICT(discord_id, role_key) DO UPDATE SET expires_at = ?",
                   (ctx.author.id, role_key, expires, expires))
@@ -2149,7 +2149,7 @@ async def entraide(ctx: commands.Context, *, description: str = ""):
         annonce_msg = await ctx.reply(embed=annonce_embed)
 
         # Stocker le lien annonce → ticket dans bot_meta
-        conn = sqlite3.connect("songe.db")
+        conn = sqlite3.connect("save.db")
         c = conn.cursor()
         c.execute("INSERT INTO bot_meta (key, value) VALUES (?, ?)",
                   (f"entraide_ticket_{annonce_msg.id}", f"{ticket.id}|{ctx.author.id}"))
@@ -2172,7 +2172,7 @@ async def prendre(ctx: commands.Context):
         return
 
     # Récupérer le ticket lié
-    conn = sqlite3.connect("songe.db")
+    conn = sqlite3.connect("save.db")
     c = conn.cursor()
     c.execute("SELECT value FROM bot_meta WHERE key = ?", (f"entraide_ticket_{ref.message_id}",))
     row = c.fetchone()
@@ -2196,7 +2196,7 @@ async def prendre(ctx: commands.Context):
         return
 
     # Vérifier si déjà pris en charge
-    conn = sqlite3.connect("songe.db")
+    conn = sqlite3.connect("save.db")
     c = conn.cursor()
     c.execute("SELECT value FROM bot_meta WHERE key = ?", (f"entraide_helper_{ticket_id}",))
     existing = c.fetchone()
@@ -2231,7 +2231,7 @@ async def prendre(ctx: commands.Context):
         return
 
     # Enregistrer le helper
-    conn = sqlite3.connect("songe.db")
+    conn = sqlite3.connect("save.db")
     c = conn.cursor()
     c.execute("INSERT OR REPLACE INTO bot_meta (key, value) VALUES (?, ?)",
               (f"entraide_helper_{ticket_id}", str(ctx.author.id)))
@@ -2281,7 +2281,7 @@ async def fermer(ctx: commands.Context):
 
     # Trouver le helper
     helper_id = None
-    conn = sqlite3.connect("songe.db")
+    conn = sqlite3.connect("save.db")
     c = conn.cursor()
     c.execute("SELECT value FROM bot_meta WHERE key = ?", (f"entraide_helper_{ctx.channel.id}",))
     row = c.fetchone()
@@ -2315,7 +2315,7 @@ async def fermer(ctx: commands.Context):
     await ctx.reply("🔒 **Ticket fermé.** Suppression dans 10 secondes...")
 
     # Nettoyage bot_meta
-    conn = sqlite3.connect("songe.db")
+    conn = sqlite3.connect("save.db")
     c = conn.cursor()
     c.execute("DELETE FROM bot_meta WHERE key LIKE ?", (f"entraide_%_{ctx.channel.id}",))
     c.execute("DELETE FROM bot_meta WHERE key LIKE ? AND value LIKE ?",
@@ -2525,7 +2525,7 @@ async def backup(ctx: commands.Context):
     try:
         await ctx.reply(
             "💾 **Backup de la base de données**\nGarde ce fichier précieusement ! Utilise `!restore` en répondant à ce message pour restaurer.",
-            file=discord.File("songe.db", filename="songe_backup.db")
+            file=discord.File("save.db", filename="save_backup.db")
         )
     except Exception as e:
         await ctx.reply(f"❌ Erreur backup: {e}")
@@ -2560,11 +2560,11 @@ async def restore(ctx: commands.Context):
 
     try:
         db_bytes = await attachment.read()
-        with open("songe.db", "wb") as f:
+        with open("save.db", "wb") as f:
             f.write(db_bytes)
         # Réinitialiser la DB pour appliquer les migrations
         init_db()
-        conn = sqlite3.connect("songe.db")
+        conn = sqlite3.connect("save.db")
         c = conn.cursor()
         c.execute("SELECT COUNT(*) FROM runs")
         nb_runs = c.fetchone()[0]

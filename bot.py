@@ -1449,7 +1449,17 @@ async def solde(ctx: commands.Context):
     balance = get_balance(ctx.author.id)
     daily = get_daily_earned(ctx.author.id)
     session = voice_sessions.get(ctx.author.id)
-    status = "🟢 En vocal (actif)" if session and not session.get("afk") else "🔴 Hors vocal" if not session else "💤 AFK"
+    if not session:
+        status = "🔴 Hors vocal"
+    elif session.get("afk"):
+        status = "💤 AFK"
+    else:
+        ch = bot.get_channel(session["channel_id"])
+        mult = get_voice_multiplier(ch) if ch else 0
+        if mult <= 0:
+            status = "🟡 En vocal (seul — pas de gain)"
+        else:
+            status = f"🟢 En vocal (actif x{mult})"
     embed = discord.Embed(title=f"💰 Solde de {ctx.author.display_name}", color=discord.Color.gold())
     embed.add_field(name="Flamtons", value=f"**{balance}** {FLAMTON}", inline=True)
     embed.add_field(name="Gagné aujourd'hui", value=f"{daily}/{DAILY_CAP} {FLAMTON}", inline=True)

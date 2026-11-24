@@ -1667,17 +1667,24 @@ def _roulette_history_line():
     return "📊 **Historique :** " + " ".join(items)
 
 
-def _roulette_spin_display(num):
-    emoji, name = _roulette_color(num)
-    bar = ""
-    neighbors = [(num - 2) % 37, (num - 1) % 37, num, (num + 1) % 37, (num + 2) % 37]
-    for n in neighbors:
-        e, _ = _roulette_color(n)
-        if n == num:
-            bar += f" **{e}{n}** "
-        else:
-            bar += f" {e}{n} "
-    return f"▸{bar}◂"
+def _roulette_table(highlight=None):
+    rows_data = [
+        [3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36],
+        [2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35],
+        [1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31, 34],
+    ]
+    zero_mark = "**【0】**" if highlight == 0 else "🟢`0`"
+    lines = [zero_mark]
+    for row in rows_data:
+        cells = []
+        for n in row:
+            e, _ = _roulette_color(n)
+            if n == highlight:
+                cells.append(f"**【{n}】**")
+            else:
+                cells.append(f"{e}`{n:>2}`")
+        lines.append(" ".join(cells))
+    return "\n".join(lines)
 
 
 @bot.command(name="roulette")
@@ -1727,16 +1734,16 @@ async def roulette(ctx: commands.Context, mise: int = 0, *, choix: str = ""):
     add_coins(ctx.author.id, -total_mise)
     color_emoji, color_name = _roulette_color(result_num)
 
-    msg = await ctx.reply(f"🎡 **La roulette tourne...**\n{_roulette_spin_display(random.choice(ROULETTE_NUMBERS))}")
+    msg = await ctx.reply(f"🎡 **La roulette tourne...**\n\n{_roulette_table()}")
 
     fake_nums = random.sample([n for n in ROULETTE_NUMBERS if n != result_num], 5)
-    delays = [0.4, 0.4, 0.5, 0.6, 0.8]
+    delays = [0.5, 0.5, 0.6, 0.7, 0.9]
     for i, fake in enumerate(fake_nums):
         await asyncio.sleep(delays[i])
-        await msg.edit(content=f"🎡 La bille rebondit...\n{_roulette_spin_display(fake)}")
+        await msg.edit(content=f"🎡 La bille rebondit...\n\n{_roulette_table(fake)}")
 
     await asyncio.sleep(1.0)
-    await msg.edit(content=f"🎡 **La bille s'arrête !**\n{_roulette_spin_display(result_num)}")
+    await msg.edit(content=f"🎡 **La bille s'arrête !**\n\n{_roulette_table(result_num)}")
     await asyncio.sleep(1.0)
 
     roulette_history.append(result_num)

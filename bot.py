@@ -6,6 +6,8 @@ import base64
 import re
 import os
 import json
+import random
+import asyncio
 from datetime import datetime
 import pytz
 
@@ -30,7 +32,18 @@ ALLOWED_CHANNEL_IDS = [int(c.strip()) for c in _channels_raw.split(",") if c.str
 
 ADMIN_ROLE = os.environ.get("ADMIN_ROLE_NAME", os.environ.get("ADMIN_ROLE", "PyroAdmin"))
 BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", "0")) or None
+CASINO_CHANNEL_ID = int(os.environ.get("CASINO_CHANNEL_ID", "0")) or None
 TIMEZONE = pytz.timezone("Europe/Paris")
+
+# --- Casino config ---
+COIN_PER_TICK = 1
+TICK_MINUTES = 3
+AFK_MUTE_TIMEOUT = 15 * 60  # 15 min en secondes
+DAILY_CAP = 500
+SLOTS_MIN_BET = 10
+SLOTS_MAX_BET = 100
+ROULETTE_MIN_BET = 10
+ROULETTE_MAX_BET = 100
 
 # --- Events config ---
 EVENTS = {
@@ -99,6 +112,20 @@ def init_db():
             discord_name TEXT NOT NULL,
             FOREIGN KEY (run_id) REFERENCES runs(id),
             UNIQUE(run_id, discord_id)
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS wallets (
+            discord_id INTEGER PRIMARY KEY,
+            balance INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS coin_daily (
+            discord_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            earned INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (discord_id, date)
         )
     """)
     # Migration : ajouter event_type si la colonne n'existe pas
@@ -252,10 +279,79 @@ def get_previous_best_time(discord_id: int, event_type: str) -> int | None:
     conn.close()
     return result[0] if result and result[0] is not None else None
 
+# --- Wallet helpers ---
+def get_balance(discord_id: int) -> int:
+    conn = sqlite3.connect("songe.db")
+    c = conn.cursor()
+    c.execute("SELECT balance FROM wallets WHERE discord_id = ?", (discord_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+
+def add_coins(discord_id: int, amount: int) -> int:
+    conn = sqlite3.connect("songe.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO wallets (discord_id, balance) VALUES (?, ?) ON CONFLICT(discord_id) DO UPDATE SET balance = balance + ?",
+              (discord_id, max(amount, 0), amount))
+    c.execute("SELECT balance FROM wallets WHERE discord_id = ?", (discord_id,))
+    new_balance = c.fetchone()[0]
+    conn.commit()
+    conn.close()
+    return new_balance
+
+
+def get_daily_earned(discord_id: int) -> int:
+    today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+    conn = sqlite3.connect("songe.db")
+    c = conn.cursor()
+    c.execute("SELECT earned FROM coin_daily WHERE discord_id = ? AND date = ?", (discord_id, today))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+
+def add_daily_earned(discord_id: int, amount: int):
+    today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+    conn = sqlite3.connect("songe.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO coin_daily (discord_id, date, earned) VALUES (?, ?, ?) ON CONFLICT(discord_id, date) DO UPDATE SET earned = earned + ?",
+              (discord_id, today, amount, amount))
+    conn.commit()
+    conn.close()
+
+
+# --- Vocal tracking ---
+# {user_id: {"channel_id": int, "joined_at": float, "last_active": float, "mute_since": float|None}}
+voice_sessions = {}
+
+
+def get_voice_multiplier(channel) -> float:
+    if not channel:
+        return 0
+    active_members = []
+    for m in channel.members:
+        if m.bot:
+            continue
+        session = voice_sessions.get(m.id)
+        if session and session.get("afk"):
+            continue
+        active_members.append(m)
+    count = len(active_members)
+    if count < 2:
+        return 0
+    if count >= 5:
+        return 2.0
+    if count >= 3:
+        return 1.5
+    return 1.0
+
+
 # --- Bot ---
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
+intents.voice_states = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -339,11 +435,109 @@ async def on_ready():
     if not periodic_backup.is_running():
         periodic_backup.start()
         print("[PERIODIC-BACKUP] Tâche planifiée toutes les 6h.")
+    if not vocal_coin_tick.is_running():
+        vocal_coin_tick.start()
+        print(f"[VOCAL-COINS] Tick toutes les {TICK_MINUTES} min.")
     try:
         synced = await bot.tree.sync()
         print(f"{len(synced)} commandes slash synchronisées")
     except Exception as e:
         print(f"Erreur sync: {e}")
+
+
+# --- Vocal coin tracking ---
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if member.bot:
+        return
+    now = datetime.now(TIMEZONE).timestamp()
+    guild = member.guild
+    afk_channel_id = guild.afk_channel.id if guild.afk_channel else None
+
+    # Quitte le vocal ou rejoint le salon AFK
+    if after.channel is None or (afk_channel_id and after.channel.id == afk_channel_id):
+        if member.id in voice_sessions:
+            del voice_sessions[member.id]
+        return
+
+    # Rejoint un vocal
+    if before.channel is None or (afk_channel_id and before.channel and before.channel.id == afk_channel_id):
+        voice_sessions[member.id] = {
+            "channel_id": after.channel.id,
+            "joined_at": now,
+            "last_active": now,
+            "mute_since": now if (after.self_mute or after.self_deaf) else None,
+            "afk": False,
+        }
+        return
+
+    # Changement d'état (mute/unmute/deaf/undeaf/changement de salon)
+    session = voice_sessions.get(member.id)
+    if not session:
+        voice_sessions[member.id] = {
+            "channel_id": after.channel.id,
+            "joined_at": now,
+            "last_active": now,
+            "mute_since": now if (after.self_mute or after.self_deaf) else None,
+            "afk": False,
+        }
+        return
+
+    session["channel_id"] = after.channel.id
+
+    if after.self_mute or after.self_deaf:
+        if session["mute_since"] is None:
+            session["mute_since"] = now
+    else:
+        session["mute_since"] = None
+        session["last_active"] = now
+        session["afk"] = False
+
+
+@tasks.loop(minutes=3)
+async def vocal_coin_tick():
+    """Crédite les pièces pour les membres actifs en vocal."""
+    now = datetime.now(TIMEZONE).timestamp()
+    to_remove = []
+
+    for user_id, session in voice_sessions.items():
+        # Vérifier timeout mute/deaf → AFK
+        if session["mute_since"] and (now - session["mute_since"]) >= AFK_MUTE_TIMEOUT:
+            session["afk"] = True
+
+        if session["afk"]:
+            continue
+
+        # Trouver le channel
+        channel = bot.get_channel(session["channel_id"])
+        if not channel:
+            to_remove.append(user_id)
+            continue
+
+        multiplier = get_voice_multiplier(channel)
+        if multiplier <= 0:
+            continue
+
+        # Vérifier le cap journalier
+        daily = get_daily_earned(user_id)
+        if daily >= DAILY_CAP:
+            continue
+
+        coins = int(COIN_PER_TICK * multiplier)
+        remaining = DAILY_CAP - daily
+        coins = min(coins, remaining)
+
+        if coins > 0:
+            add_coins(user_id, coins)
+            add_daily_earned(user_id, coins)
+
+    for uid in to_remove:
+        del voice_sessions[uid]
+
+
+@vocal_coin_tick.before_loop
+async def before_vocal_coin_tick():
+    await bot.wait_until_ready()
 
 
 # --- Commande générique pour enregistrer une run ---
@@ -809,11 +1003,292 @@ async def inscrits(ctx: commands.Context):
     await ctx.reply(embed=embed)
 
 
+# --- Casino commands ---
+SLOT_SYMBOLS = ["💎", "⭐", "🔥", "🌱", "💀"]
+SLOT_WEIGHTS = [1, 2, 3, 4, 5]  # 💎 rare, 💀 commun
+SLOT_PAYOUTS = {"💎": 20, "⭐": 8, "🔥": 4, "🌱": 2, "💀": 0}
+
+ROULETTE_NUMBERS = list(range(0, 37))  # 0-36
+ROULETTE_REDS = {1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36}
+ROULETTE_BLACKS = {2,4,6,8,10,11,13,15,17,20,22,24,26,28,29,31,33,35}
+
+
+def spin_slots():
+    return random.choices(SLOT_SYMBOLS, weights=SLOT_WEIGHTS, k=3)
+
+
+def calculate_slot_payout(reels, bet):
+    if reels[0] == reels[1] == reels[2]:
+        multiplier = SLOT_PAYOUTS.get(reels[0], 0)
+        if multiplier == 0:
+            return 0, "Triple 💀 — pas de gains !"
+        return bet * multiplier, f"**TRIPLE {reels[0]}** — x{multiplier} !"
+    if reels[0] == reels[1] or reels[1] == reels[2] or reels[0] == reels[2]:
+        payout = int(bet * 1.5)
+        return payout, "Paire — x1.5"
+    return 0, "Rien..."
+
+
+@bot.command(name="solde")
+async def solde(ctx: commands.Context):
+    """!solde — Voir son solde de pièces."""
+    if CASINO_CHANNEL_ID and ctx.channel.id != CASINO_CHANNEL_ID:
+        if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
+            return
+    balance = get_balance(ctx.author.id)
+    daily = get_daily_earned(ctx.author.id)
+    session = voice_sessions.get(ctx.author.id)
+    status = "🟢 En vocal (actif)" if session and not session.get("afk") else "🔴 Hors vocal" if not session else "💤 AFK"
+    embed = discord.Embed(title=f"💰 Solde de {ctx.author.display_name}", color=discord.Color.gold())
+    embed.add_field(name="Pièces", value=f"**{balance}** 🪙", inline=True)
+    embed.add_field(name="Gagné aujourd'hui", value=f"{daily}/{DAILY_CAP} 🪙", inline=True)
+    embed.add_field(name="Statut vocal", value=status, inline=True)
+    await ctx.reply(embed=embed)
+
+
+@bot.command(name="classement-coins")
+async def classement_coins(ctx: commands.Context):
+    """!classement-coins — Top 15 des plus riches."""
+    if CASINO_CHANNEL_ID and ctx.channel.id != CASINO_CHANNEL_ID:
+        if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
+            return
+    conn = sqlite3.connect("songe.db")
+    c = conn.cursor()
+    c.execute("SELECT discord_id, balance FROM wallets WHERE balance > 0 ORDER BY balance DESC LIMIT 15")
+    rows = c.fetchall()
+    conn.close()
+    if not rows:
+        await ctx.reply("📭 Personne n'a encore de pièces.")
+        return
+    embed = discord.Embed(title="💰 Classement des fortunes", color=discord.Color.gold())
+    for i, (did, bal) in enumerate(rows, 1):
+        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"**{i}.**"
+        member = ctx.guild.get_member(did)
+        name = member.display_name if member else f"ID:{did}"
+        embed.add_field(name=f"{medal} {name}", value=f"**{bal}** 🪙", inline=False)
+    await ctx.reply(embed=embed)
+
+
+@bot.command(name="slots")
+async def slots(ctx: commands.Context, mise: int = 0):
+    """!slots <mise> — Machine à sous."""
+    if CASINO_CHANNEL_ID and ctx.channel.id != CASINO_CHANNEL_ID:
+        return
+    if not mise:
+        await ctx.reply(f"❌ Usage : `!slots <mise>` (min {SLOTS_MIN_BET}, max {SLOTS_MAX_BET})")
+        return
+    if mise < SLOTS_MIN_BET or mise > SLOTS_MAX_BET:
+        await ctx.reply(f"❌ Mise entre **{SLOTS_MIN_BET}** et **{SLOTS_MAX_BET}** 🪙")
+        return
+    balance = get_balance(ctx.author.id)
+    if balance < mise:
+        await ctx.reply(f"❌ Solde insuffisant. Tu as **{balance}** 🪙")
+        return
+
+    add_coins(ctx.author.id, -mise)
+
+    # Animation
+    msg = await ctx.reply("🎰 **|** ❓ **|** ❓ **|** ❓ **|**")
+    reels = spin_slots()
+
+    await asyncio.sleep(0.8)
+    await msg.edit(content=f"🎰 **|** {reels[0]} **|** ❓ **|** ❓ **|**")
+    await asyncio.sleep(0.8)
+    await msg.edit(content=f"🎰 **|** {reels[0]} **|** {reels[1]} **|** ❓ **|**")
+    await asyncio.sleep(0.8)
+
+    payout, desc = calculate_slot_payout(reels, mise)
+    if payout > 0:
+        add_coins(ctx.author.id, payout)
+
+    new_balance = get_balance(ctx.author.id)
+    result_line = f"🎰 **|** {reels[0]} **|** {reels[1]} **|** {reels[2]} **|**"
+
+    if payout > 0:
+        gain = payout - mise
+        embed = discord.Embed(title="🎰 Machine à sous", color=discord.Color.green())
+        embed.description = f"{result_line}\n\n✅ {desc}\n💰 **+{gain}** 🪙 (gain net)"
+    else:
+        embed = discord.Embed(title="🎰 Machine à sous", color=discord.Color.red())
+        embed.description = f"{result_line}\n\n❌ {desc}\n💸 **-{mise}** 🪙"
+
+    embed.set_footer(text=f"Solde : {new_balance} 🪙")
+    await msg.edit(content=None, embed=embed)
+
+
+@bot.command(name="coinflip")
+async def coinflip(ctx: commands.Context, target: discord.Member = None, mise: int = 0):
+    """!coinflip @joueur <mise> — Pile ou face PvP."""
+    if CASINO_CHANNEL_ID and ctx.channel.id != CASINO_CHANNEL_ID:
+        return
+    if not target or not mise:
+        await ctx.reply("❌ Usage : `!coinflip @joueur <mise>`")
+        return
+    if target.id == ctx.author.id:
+        await ctx.reply("❌ Tu ne peux pas jouer contre toi-même.")
+        return
+    if target.bot:
+        await ctx.reply("❌ Tu ne peux pas jouer contre un bot.")
+        return
+    if mise < 10:
+        await ctx.reply("❌ Mise minimum : **10** 🪙")
+        return
+
+    bal_author = get_balance(ctx.author.id)
+    bal_target = get_balance(target.id)
+    if bal_author < mise:
+        await ctx.reply(f"❌ Solde insuffisant. Tu as **{bal_author}** 🪙")
+        return
+    if bal_target < mise:
+        await ctx.reply(f"❌ {target.display_name} n'a que **{bal_target}** 🪙")
+        return
+
+    msg = await ctx.reply(f"🪙 {target.mention}, {ctx.author.display_name} te défie pour **{mise}** 🪙 ! Réagis ✅ pour accepter (30s).")
+    await msg.add_reaction("✅")
+
+    def check(reaction, user):
+        return user.id == target.id and str(reaction.emoji) == "✅" and reaction.message.id == msg.id
+
+    try:
+        await bot.wait_for("reaction_add", timeout=30.0, check=check)
+    except Exception:
+        await msg.edit(content=f"⏰ {target.display_name} n'a pas accepté le défi.")
+        return
+
+    # Vérifier les soldes à nouveau
+    if get_balance(ctx.author.id) < mise or get_balance(target.id) < mise:
+        await msg.edit(content="❌ Solde insuffisant après acceptation.")
+        return
+
+    result = random.choice(["pile", "face"])
+    winner = ctx.author if result == "pile" else target
+    loser = target if result == "pile" else ctx.author
+
+    add_coins(winner.id, mise)
+    add_coins(loser.id, -mise)
+
+    embed = discord.Embed(title="🪙 Coinflip", color=discord.Color.gold())
+    embed.description = (
+        f"**{result.upper()}** !\n\n"
+        f"🏆 {winner.mention} gagne **+{mise}** 🪙\n"
+        f"💸 {loser.mention} perd **-{mise}** 🪙"
+    )
+    await msg.edit(content=None, embed=embed)
+
+
+@bot.command(name="roulette")
+async def roulette(ctx: commands.Context, mise: int = 0, *, choix: str = ""):
+    """!roulette <mise> <choix> — Roulette de casino."""
+    if CASINO_CHANNEL_ID and ctx.channel.id != CASINO_CHANNEL_ID:
+        return
+    if not mise or not choix:
+        await ctx.reply(
+            f"❌ Usage : `!roulette <mise> <choix>`\n\n"
+            f"**Choix possibles :**\n"
+            f"• Un numéro (0-36) → paye **x35**\n"
+            f"• `rouge` ou `noir` → paye **x2**\n"
+            f"• `pair` ou `impair` → paye **x2**\n"
+            f"• `1-18` ou `19-36` → paye **x2**\n"
+            f"• `douzaine1`, `douzaine2`, `douzaine3` → paye **x3**\n\n"
+            f"Mise : {ROULETTE_MIN_BET}-{ROULETTE_MAX_BET} 🪙"
+        )
+        return
+    if mise < ROULETTE_MIN_BET or mise > ROULETTE_MAX_BET:
+        await ctx.reply(f"❌ Mise entre **{ROULETTE_MIN_BET}** et **{ROULETTE_MAX_BET}** 🪙")
+        return
+    balance = get_balance(ctx.author.id)
+    if balance < mise:
+        await ctx.reply(f"❌ Solde insuffisant. Tu as **{balance}** 🪙")
+        return
+
+    choix = choix.lower().strip()
+    result_num = random.choice(ROULETTE_NUMBERS)
+    is_red = result_num in ROULETTE_REDS
+    is_black = result_num in ROULETTE_BLACKS
+    color_emoji = "🔴" if is_red else "⚫" if is_black else "🟢"
+    color_name = "Rouge" if is_red else "Noir" if is_black else "Vert"
+
+    payout = 0
+    bet_desc = ""
+
+    # Numéro exact
+    if choix.isdigit() and 0 <= int(choix) <= 36:
+        bet_desc = f"Numéro {choix}"
+        if int(choix) == result_num:
+            payout = mise * 35
+    elif choix == "rouge":
+        bet_desc = "Rouge"
+        if is_red:
+            payout = mise * 2
+    elif choix == "noir":
+        bet_desc = "Noir"
+        if is_black:
+            payout = mise * 2
+    elif choix == "pair":
+        bet_desc = "Pair"
+        if result_num != 0 and result_num % 2 == 0:
+            payout = mise * 2
+    elif choix == "impair":
+        bet_desc = "Impair"
+        if result_num % 2 == 1:
+            payout = mise * 2
+    elif choix == "1-18":
+        bet_desc = "1-18"
+        if 1 <= result_num <= 18:
+            payout = mise * 2
+    elif choix == "19-36":
+        bet_desc = "19-36"
+        if 19 <= result_num <= 36:
+            payout = mise * 2
+    elif choix == "douzaine1":
+        bet_desc = "Douzaine 1 (1-12)"
+        if 1 <= result_num <= 12:
+            payout = mise * 3
+    elif choix == "douzaine2":
+        bet_desc = "Douzaine 2 (13-24)"
+        if 13 <= result_num <= 24:
+            payout = mise * 3
+    elif choix == "douzaine3":
+        bet_desc = "Douzaine 3 (25-36)"
+        if 25 <= result_num <= 36:
+            payout = mise * 3
+    else:
+        await ctx.reply("❌ Choix invalide. Tape `!roulette` pour voir les options.")
+        return
+
+    add_coins(ctx.author.id, -mise)
+
+    msg = await ctx.reply("🎡 La roulette tourne...")
+    await asyncio.sleep(1.5)
+
+    if payout > 0:
+        add_coins(ctx.author.id, payout)
+        gain = payout - mise
+        embed = discord.Embed(title="🎡 Roulette", color=discord.Color.green())
+        embed.description = (
+            f"{color_emoji} **{result_num}** — {color_name}\n\n"
+            f"Mise : {bet_desc}\n"
+            f"✅ **Gagné ! +{gain}** 🪙"
+        )
+    else:
+        embed = discord.Embed(title="🎡 Roulette", color=discord.Color.red())
+        embed.description = (
+            f"{color_emoji} **{result_num}** — {color_name}\n\n"
+            f"Mise : {bet_desc}\n"
+            f"❌ **Perdu ! -{mise}** 🪙"
+        )
+
+    new_balance = get_balance(ctx.author.id)
+    embed.set_footer(text=f"Solde : {new_balance} 🪙")
+    await msg.edit(content=None, embed=embed)
+
+
 @bot.command(name="aide")
 async def aide(ctx: commands.Context):
     """!aide — Liste des commandes."""
     if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
-        return
+        if not (CASINO_CHANNEL_ID and ctx.channel.id == CASINO_CHANNEL_ID):
+            return
 
     embed = discord.Embed(
         title="🤖 Pyrosonge — Commandes",
@@ -823,6 +1298,14 @@ async def aide(ctx: commands.Context):
     embed.add_field(name="🏆 Classements", value="`!classement` — classement Songe\n`!classement bolgrot` — classement Bolgrot", inline=False)
     embed.add_field(name="📊 Stats", value="`!stats @joueur` — stats d'un joueur\n`!historique @joueur` — historique des runs", inline=False)
     embed.add_field(name="📅 Événements", value="`!event` — événements en cours\n`!inscrits` — liste des inscrits", inline=False)
+    embed.add_field(name="🎰 Casino", value=(
+        "`!solde` — voir ton solde\n"
+        "`!classement-coins` — top 15 des fortunes\n"
+        "`!slots <mise>` — machine à sous (10-100 🪙)\n"
+        "`!coinflip @joueur <mise>` — pile ou face PvP\n"
+        "`!roulette <mise> <choix>` — roulette (rouge/noir/numéro...)\n"
+        f"💡 Gagne des pièces en vocal ({COIN_PER_TICK} 🪙/{TICK_MINUTES} min, bonus groupe)"
+    ), inline=False)
     embed.add_field(name="🔧 Admin", value=f"**Répondre** au message d'une run + `!supprun` — supprimer cette run\n`!reset` — réinitialiser toutes les runs\n`!backup` — sauvegarder la base\n`!restore` — restaurer depuis un backup\n`!purge <id_debut> <id_fin>` — supprimer les messages entre deux IDs\n(rôle {ADMIN_ROLE} requis)", inline=False)
 
     await ctx.reply(embed=embed)

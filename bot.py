@@ -1471,19 +1471,14 @@ async def slots(ctx: commands.Context, mise: int = 0):
     msg = await ctx.reply("🎰 **|** ❓ **|** ❓ **|** ❓ **|** — *Les rouleaux tournent...*")
 
     others = [s for s in SLOT_SYMBOLS if s not in reels]
-    # Phase 1 : les 3 rouleaux tournent en simultané (4 frames)
-    for _ in range(4):
+    # 4 frames : les 3 symboles changent en simultané
+    for i in range(4):
         fake = [random.choice(others) for _ in range(3)]
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.35)
         await msg.edit(content=f"🎰 **|** {fake[0]} **|** {fake[1]} **|** {fake[2]} **|** — *Les rouleaux tournent...*")
-    # Phase 2 : verrouillage un par un
-    for lock in range(3):
-        await asyncio.sleep(0.2)
-        still = [random.choice(others) for _ in range(3)]
-        locked = " **|** ".join(reels[:lock+1])
-        spinning = " **|** ".join(still[lock+1:3])
-        line = locked + (" **|** " + spinning if lock < 2 else "")
-        await msg.edit(content=f"🎰 **|** {line} **|** — *Rouleau {lock+1} arrêté !*")
+    # Résultat final
+    await asyncio.sleep(0.5)
+    await msg.edit(content=f"🎰 **|** {reels[0]} **|** {reels[1]} **|** {reels[2]} **|** — *Arrêté !*")
 
     payout, desc = calculate_slot_payout(reels, mise)
     if payout > 0:

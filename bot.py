@@ -75,10 +75,10 @@ EVENT_DIFFICULTY_MULTIPLIERS = {
 
 # --- Shop config ---
 SHOP_ROLES = {
-    "bronze": {"price": 300, "days": 30, "discount": 0.05},
-    "argent": {"price": 750, "days": 30, "discount": 0.10},
-    "or": {"price": 1500, "days": 30, "discount": 0.20},
-    "diamant": {"price": 3000, "days": 30, "discount": 0.30},
+    "bronze": {"price": 300, "days": 30, "discount": 0.05, "role_name": "🥉 • Bronze"},
+    "argent": {"price": 750, "days": 30, "discount": 0.10, "role_name": "🥈 • Argent"},
+    "or": {"price": 1500, "days": 30, "discount": 0.20, "role_name": "🥇 • Or"},
+    "diamant": {"price": 3000, "days": 30, "discount": 0.30, "role_name": "💎 • Diamant"},
 }
 SHOP_ITEMS = {
     "8ball": 50, "devinette": 75, "rename": 100, "avatar": 150,
@@ -858,8 +858,8 @@ async def check_expired_roles():
             member = guild.get_member(discord_id)
             if not member:
                 continue
-            role_name = SHOP_ROLES.get(role_key, {}).get("discount", role_key)
-            role = discord.utils.get(guild.roles, name=role_key.capitalize())
+            role_display = SHOP_ROLES.get(role_key, {}).get("role_name", role_key.capitalize())
+            role = discord.utils.get(guild.roles, name=role_display)
             if role and role in member.roles:
                 try:
                     await member.remove_role(role)
@@ -1468,32 +1468,51 @@ async def slots(ctx: commands.Context, mise: int = 0):
     add_coins(ctx.author.id, -mise)
 
     reels = spin_slots()
-    msg = await ctx.reply("🎰 **|** ❓ **|** ❓ **|** ❓ **|** — *Les rouleaux tournent...*")
 
-    others = [s for s in SLOT_SYMBOLS if s not in reels]
-    # 4 frames : les 3 symboles changent en simultané
-    for i in range(4):
-        fake = [random.choice(others) for _ in range(3)]
-        await asyncio.sleep(0.35)
-        await msg.edit(content=f"🎰 **|** {fake[0]} **|** {fake[1]} **|** {fake[2]} **|** — *Les rouleaux tournent...*")
-    # Résultat final
+    def make_grid(row2):
+        rows = []
+        for r in range(4):
+            if r == 2:
+                syms = row2
+            else:
+                syms = random.choices(SLOT_SYMBOLS, k=3)
+            rows.append(f"**|** {syms[0]} **|** {syms[1]} **|** {syms[2]} **|**")
+        return "\n".join(rows)
+
+    fake_start = [random.choices(SLOT_SYMBOLS, k=3) for _ in range(3)]
+    msg = await ctx.reply(f"🎰 *Les rouleaux tournent...*\n{make_grid(fake_start[0])}")
+
+    # 6 frames : grille 4x3 qui défile en simultané
+    for i in range(6):
+        fake_mid = random.choices(SLOT_SYMBOLS, k=3)
+        await asyncio.sleep(0.4)
+        await msg.edit(content=f"🎰 *Les rouleaux tournent...*\n{make_grid(fake_mid)}")
+
+    # Résultat final : la ligne du milieu (row 2) = résultat réel
+    final_rows = []
+    for r in range(4):
+        if r == 2:
+            syms = reels
+        else:
+            syms = random.choices(SLOT_SYMBOLS, k=3)
+        final_rows.append(f"**|** {syms[0]} **|** {syms[1]} **|** {syms[2]} **|**")
     await asyncio.sleep(0.5)
-    await msg.edit(content=f"🎰 **|** {reels[0]} **|** {reels[1]} **|** {reels[2]} **|** — *Arrêté !*")
+    await msg.edit(content=f"🎰 *Arrêté !*\n" + "\n".join(final_rows))
 
     payout, desc = calculate_slot_payout(reels, mise)
     if payout > 0:
         add_coins(ctx.author.id, payout)
 
     new_balance = get_balance(ctx.author.id)
-    result_line = f"🎰 **|** {reels[0]} **|** {reels[1]} **|** {reels[2]} **|**"
+    result_grid = "\n".join(final_rows)
 
     if payout > 0:
         gain = payout - mise
         embed = discord.Embed(title="🎰 Machine à sous", color=discord.Color.green())
-        embed.description = f"{result_line}\n\n✅ {desc}\n💰 **+{gain}** {FLAMTON} (gain net)\n\n💰 Solde : **{new_balance}** {FLAMTON}"
+        embed.description = f"{result_grid}\n▶️ Ligne gagnante : {reels[0]} {reels[1]} {reels[2]}\n\n✅ {desc}\n💰 **+{gain}** {FLAMTON} (gain net)\n\n💰 Solde : **{new_balance}** {FLAMTON}"
     else:
         embed = discord.Embed(title="🎰 Machine à sous", color=discord.Color.red())
-        embed.description = f"{result_line}\n\n❌ {desc}\n💸 **-{mise}** {FLAMTON}\n\n💰 Solde : **{new_balance}** {FLAMTON}"
+        embed.description = f"{result_grid}\n▶️ Ligne : {reels[0]} {reels[1]} {reels[2]}\n\n❌ {desc}\n💸 **-{mise}** {FLAMTON}\n\n💰 Solde : **{new_balance}** {FLAMTON}"
     await msg.edit(content=None, embed=embed)
 
 
@@ -1750,9 +1769,10 @@ async def buy(ctx: commands.Context, *, args: str = ""):
             await ctx.reply(f"❌ Solde insuffisant. Il te faut **{price}** {FLAMTON}, tu as **{bal}** {FLAMTON}")
             return
 
-        role = discord.utils.get(ctx.guild.roles, name=role_key.capitalize())
+        role_display = info.get("role_name", role_key.capitalize())
+        role = discord.utils.get(ctx.guild.roles, name=role_display)
         if not role:
-            await ctx.reply(f"❌ Le rôle **{role_key.capitalize()}** n'existe pas sur ce serveur. Un admin doit le créer.")
+            await ctx.reply(f"❌ Le rôle **{role_display}** n'existe pas sur ce serveur. Un admin doit le créer.")
             return
 
         add_coins(ctx.author.id, -price)
@@ -1770,7 +1790,7 @@ async def buy(ctx: commands.Context, *, args: str = ""):
             await ctx.reply(f"⚠️ Achat enregistré mais impossible d'ajouter le rôle Discord : {e}")
             return
 
-        await ctx.reply(f"✅ Rôle **{role_key.capitalize()}** activé pour {info['days']} jours ! (-{int(info['discount']*100)}% sur le Tier 3)\n💰 -{price} {FLAMTON} | Solde : **{get_balance(ctx.author.id)}** {FLAMTON}")
+        await ctx.reply(f"✅ Rôle **{role_display}** activé pour {info['days']} jours ! (-{int(info['discount']*100)}% sur le Tier 3)\n💰 -{price} {FLAMTON} | Solde : **{get_balance(ctx.author.id)}** {FLAMTON}")
         return
 
     # --- 8BALL ---

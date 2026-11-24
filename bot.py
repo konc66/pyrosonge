@@ -646,7 +646,6 @@ async def first_boot_intro():
                 f"🎡 `!roulette <mise> <choix>` — Roulette ({ROULETTE_MIN_BET}-{ROULETTE_MAX_BET} {FLAMTON})\n"
                 f"💰 `!solde` — Voir ton solde\n"
                 f"🏆 `!classement-coins` — Top 15 des fortunes\n\n"
-                f"⚠️ **Limite de perte : {CASINO_DAILY_LOSS_CAP} {FLAMTON}/jour** (slots/roulette)\n\n"
                 f"🚫 Toute tentative de génération abusive de {FLAMTON} (AFK, exploit, multicompte...) sera sanctionnée."
             ),
             "color": discord.Color.gold(),
@@ -669,7 +668,6 @@ async def first_boot_intro():
                 "**Ce qui se passe ici :**\n"
                 "🔥 **Roast du jour** — Tous les jours à **12h**, un membre aléatoire se fait vanner par le bot\n"
                 "💖 **Compliment du jour** — Tous les jours à **18h**, un membre reçoit un compliment\n"
-                "📊 `!sondage \"question\"` — Crée un sondage\n\n"
                 "C'est 100% automatique et gratuit. Prépare-toi 😈\n\n"
                 f"🚫 Toute tentative de génération abusive de {FLAMTON} (AFK, exploit, multicompte...) sera sanctionnée."
             ),
@@ -1470,38 +1468,29 @@ async def slots(ctx: commands.Context, mise: int = 0):
     if balance < mise:
         await ctx.reply(f"❌ Solde insuffisant. Tu as **{balance}** {FLAMTON}")
         return
-    daily_loss = get_daily_loss(ctx.author.id)
-    if daily_loss >= CASINO_DAILY_LOSS_CAP:
-        await ctx.reply(f"🛑 Tu as atteint la limite de perte journalière (**{CASINO_DAILY_LOSS_CAP}** {FLAMTON}). Reviens demain !")
-        return
-
     add_coins(ctx.author.id, -mise)
 
     reels = spin_slots()
     msg = await ctx.reply("🎰 **|** ❓ **|** ❓ **|** ❓ **|** — *Les rouleaux tournent...*")
 
-    # Animation : chaque rouleau "tourne" avec des faux symboles avant de s'arrêter
-    for reel_idx in range(3):
-        # 3 faux symboles qui défilent
-        fake_symbols = random.sample([s for s in SLOT_SYMBOLS if s != reels[reel_idx]], 3)
-        for fake in fake_symbols:
-            revealed = " **|** ".join(reels[:reel_idx]) + (" **|** " if reel_idx > 0 else "")
-            spinning = f"{fake}"
-            remaining = " **|** ".join(["❓"] * (2 - reel_idx))
-            await asyncio.sleep(0.25)
-            await msg.edit(content=f"🎰 **|** {revealed}{spinning} **|** {remaining} **|** — *Rouleau {reel_idx+1}...*")
-        # Symbole final
-        revealed_all = " **|** ".join(reels[:reel_idx+1])
-        remaining = " **|** ".join(["❓"] * (2 - reel_idx))
-        remaining_part = f" **|** {remaining} **|**" if reel_idx < 2 else " **|**"
-        await asyncio.sleep(0.4)
-        await msg.edit(content=f"🎰 **|** {revealed_all}{remaining_part} — *Arrêté !*")
+    others = [s for s in SLOT_SYMBOLS if s not in reels]
+    # Phase 1 : les 3 rouleaux tournent en simultané (4 frames)
+    for _ in range(4):
+        fake = [random.choice(others) for _ in range(3)]
+        await asyncio.sleep(0.3)
+        await msg.edit(content=f"🎰 **|** {fake[0]} **|** {fake[1]} **|** {fake[2]} **|** — *Les rouleaux tournent...*")
+    # Phase 2 : verrouillage un par un
+    for lock in range(3):
+        await asyncio.sleep(0.2)
+        still = [random.choice(others) for _ in range(3)]
+        locked = " **|** ".join(reels[:lock+1])
+        spinning = " **|** ".join(still[lock+1:3])
+        line = locked + (" **|** " + spinning if lock < 2 else "")
+        await msg.edit(content=f"🎰 **|** {line} **|** — *Rouleau {lock+1} arrêté !*")
 
     payout, desc = calculate_slot_payout(reels, mise)
     if payout > 0:
         add_coins(ctx.author.id, payout)
-    else:
-        add_daily_loss(ctx.author.id, mise)
 
     new_balance = get_balance(ctx.author.id)
     result_line = f"🎰 **|** {reels[0]} **|** {reels[1]} **|** {reels[2]} **|**"
@@ -1609,11 +1598,6 @@ async def roulette(ctx: commands.Context, mise: int = 0, *, choix: str = ""):
     if balance < mise:
         await ctx.reply(f"❌ Solde insuffisant. Tu as **{balance}** {FLAMTON}")
         return
-    daily_loss = get_daily_loss(ctx.author.id)
-    if daily_loss >= CASINO_DAILY_LOSS_CAP:
-        await ctx.reply(f"🛑 Tu as atteint la limite de perte journalière (**{CASINO_DAILY_LOSS_CAP}** {FLAMTON}). Reviens demain !")
-        return
-
     choix = choix.lower().strip()
     result_num = random.choice(ROULETTE_NUMBERS)
     is_red = result_num in ROULETTE_REDS
@@ -1692,7 +1676,6 @@ async def roulette(ctx: commands.Context, mise: int = 0, *, choix: str = ""):
             f"✅ **Gagné ! +{gain}** {FLAMTON}"
         )
     else:
-        add_daily_loss(ctx.author.id, mise)
         embed = discord.Embed(title="🎡 Roulette", color=discord.Color.red())
         embed.description = (
             f"{color_emoji} **{result_num}** — {color_name}\n\n"
@@ -2435,24 +2418,6 @@ async def before_daily_compliment():
     await asyncio.sleep(wait_seconds)
 
 
-# --- Sondage (gratuit) ---
-@bot.command(name="sondage")
-async def sondage(ctx: commands.Context, *, question: str = ""):
-    """!sondage "question" — Crée un sondage avec réactions."""
-    if FUN_CHANNEL_ID and ctx.channel.id != FUN_CHANNEL_ID:
-        await ctx.reply(f"❌ Utilise <#{FUN_CHANNEL_ID}> pour les sondages.", delete_after=5)
-        return
-    if not question:
-        await ctx.reply("❌ Usage : `!sondage \"ta question\"`")
-        return
-    question = question.strip().strip('"')
-    embed = discord.Embed(title="📊 Sondage", description=question, color=discord.Color.blue())
-    embed.set_footer(text=f"Par {ctx.author.display_name} — Réagis pour voter !")
-    poll = await ctx.reply(embed=embed)
-    await poll.add_reaction("👍")
-    await poll.add_reaction("👎")
-
-
 @bot.command(name="aide")
 async def aide(ctx: commands.Context):
     """!aide — Liste des commandes."""
@@ -2475,8 +2440,7 @@ async def aide(ctx: commands.Context):
         "`!classement-coins` — top 15 des fortunes\n"
         f"`!slots <mise>` — machine à sous ({SLOTS_MIN_BET}-{SLOTS_MAX_BET} {FLAMTON})\n"
         f"`!coinflip @joueur <mise>` — pile ou face PvP (10-{COINFLIP_MAX_BET} {FLAMTON})\n"
-        f"`!roulette <mise> <choix>` — roulette ({ROULETTE_MIN_BET}-{ROULETTE_MAX_BET} {FLAMTON})\n"
-        f"⚠️ Limite perte : {CASINO_DAILY_LOSS_CAP}/jour (slots/roulette)"
+        f"`!roulette <mise> <choix>` — roulette ({ROULETTE_MIN_BET}-{ROULETTE_MAX_BET} {FLAMTON})"
     ), inline=False)
     embed.add_field(name="🛒 Boutique", value=(
         "`!shop` — voir la boutique\n"
@@ -2490,8 +2454,7 @@ async def aide(ctx: commands.Context):
     ), inline=False)
     embed.add_field(name="🎉 Fun", value=(
         "🔥 **Roast auto** — tous les jours à 12h\n"
-        "💖 **Compliment auto** — tous les jours à 18h\n"
-        "`!sondage \"question\"` — sondage avec réactions"
+        "💖 **Compliment auto** — tous les jours à 18h"
     ), inline=False)
     embed.add_field(name="🔧 Admin", value=f"`!raid @joueurs` — récompense les participants d'un raid (+{RAID_REWARD} {FLAMTON})\n`!coins add/remove @joueur <montant>` — créditer/retirer des {FLAMTON}\n**Répondre** au message d'une run + `!supprun` — supprimer cette run\n`!reset` — réinitialiser toutes les runs\n`!backup` — sauvegarder la base\n`!restore` — restaurer depuis un backup\n`!purge <id_debut> <id_fin>` — supprimer les messages entre deux IDs\n(rôle {ADMIN_ROLE} requis)", inline=False)
 

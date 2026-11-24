@@ -602,9 +602,9 @@ async def auto_backup(source_channel):
         print(f"[AUTO-BACKUP] Erreur: {e}")
 
 
-@tasks.loop(hours=6)
+@tasks.loop(minutes=30)
 async def periodic_backup():
-    """Backup automatique toutes les 6h."""
+    """Backup automatique toutes les 30 min."""
     target = bot.get_channel(BACKUP_CHANNEL_ID) if BACKUP_CHANNEL_ID else None
     if not target:
         print("[PERIODIC-BACKUP] BACKUP_CHANNEL_ID non configuré, skip.")
@@ -711,7 +711,7 @@ async def on_ready():
     await first_boot_intro()
     if not periodic_backup.is_running():
         periodic_backup.start()
-        print("[PERIODIC-BACKUP] Tâche planifiée toutes les 6h.")
+        print("[PERIODIC-BACKUP] Tâche planifiée toutes les 30 min.")
     now = datetime.now(TIMEZONE).timestamp()
     for guild in bot.guilds:
         afk_channel_id = guild.afk_channel.id if guild.afk_channel else None

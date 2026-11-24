@@ -2728,8 +2728,16 @@ async def coins_admin(ctx: commands.Context, action: str = "", *, args: str = ""
             break
         except ValueError:
             continue
+    if action == "reset" and mentioned:
+        lines = []
+        for target in mentioned:
+            bal = get_balance(target.id)
+            add_coins(target.id, -bal)
+            lines.append(f"🔄 {target.mention} remis à **0** {FLAMTON} (ancien solde : {bal})")
+        await ctx.reply("\n".join(lines))
+        return
     if action not in ("add", "remove") or not mentioned or montant <= 0:
-        await ctx.reply("❌ Usage : `!coins add @joueur(s) <montant>` ou `!coins remove @joueur(s) <montant>`")
+        await ctx.reply("❌ Usage :\n`!coins add @joueur(s) <montant>`\n`!coins remove @joueur(s) <montant>`\n`!coins reset @joueur(s)`")
         return
     lines = []
     for target in mentioned:

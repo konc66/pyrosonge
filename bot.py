@@ -2335,6 +2335,32 @@ async def fermer(ctx: commands.Context):
         await ctx.reply(f"❌ Erreur suppression : {e}")
 
 
+@bot.command(name="roast")
+async def roast_cmd(ctx: commands.Context, target: discord.Member = None):
+    is_admin = any(role.name == ADMIN_ROLE for role in ctx.author.roles) or ctx.author.guild_permissions.administrator
+    if not is_admin:
+        return
+    if not target:
+        role = ctx.guild.get_role(GUILD_MEMBER_ROLE_ID) if GUILD_MEMBER_ROLE_ID else None
+        members = [m for m in (role.members if role else ctx.guild.members) if not m.bot]
+        if not members:
+            await ctx.reply("❌ Aucun membre trouvé.")
+            return
+        target = random.choice(members)
+    try:
+        text = generate_text_gemini(
+            f"Tu es un bot Discord humoristique dans une guilde gaming. Génère une vanne drôle et bon enfant "
+            f"(pas méchant, pas vulgaire, pas discriminatoire) sur le joueur \"{target.display_name}\". "
+            f"Tu peux parler de gaming, de ses habitudes imaginaires, de stéréotypes de joueurs, d'humour absurde, "
+            f"de MMO, de rage quit, de tryhard, de tout ce qui est drôle dans la culture gaming et internet. "
+            f"Maximum 2 phrases. En français. Sois créatif et varié."
+        )
+        embed = discord.Embed(title=f"🔥 Roast — {target.display_name}", description=text, color=discord.Color.orange())
+        await ctx.reply(target.mention, embed=embed)
+    except Exception as e:
+        await ctx.reply(f"❌ Erreur : {e}")
+
+
 # --- Roast & Compliment automatiques (1x/jour chacun) ---
 @tasks.loop(hours=24)
 async def daily_roast():

@@ -714,6 +714,25 @@ async def on_ready():
     if not periodic_backup.is_running():
         periodic_backup.start()
         print("[PERIODIC-BACKUP] Tâche planifiée toutes les 6h.")
+    now = datetime.now(TIMEZONE).timestamp()
+    for guild in bot.guilds:
+        afk_channel_id = guild.afk_channel.id if guild.afk_channel else None
+        for vc in guild.voice_channels:
+            if afk_channel_id and vc.id == afk_channel_id:
+                continue
+            for m in vc.members:
+                if m.bot or m.id in voice_sessions:
+                    continue
+                vs = m.voice
+                voice_sessions[m.id] = {
+                    "channel_id": vc.id,
+                    "joined_at": now,
+                    "last_active": now,
+                    "mute_since": now if (vs and (vs.self_mute or vs.self_deaf)) else None,
+                    "afk": False,
+                }
+    if voice_sessions:
+        print(f"[VOCAL-COINS] {len(voice_sessions)} membre(s) déjà en vocal récupéré(s).")
     if not vocal_coin_tick.is_running():
         vocal_coin_tick.start()
         print(f"[VOCAL-COINS] Tick toutes les {TICK_MINUTES} min.")

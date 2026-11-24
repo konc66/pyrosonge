@@ -912,25 +912,58 @@ async def purge(ctx: commands.Context, id_debut: int = 0, id_fin: int = 0):
     if id_debut > id_fin:
         id_debut, id_fin = id_fin, id_debut
 
-    msg = await ctx.reply("🗑️ Suppression en cours...")
-    deleted = 0
-    errors = 0
     try:
         after = discord.Object(id=id_debut - 1)
         before = discord.Object(id=id_fin + 1)
         messages = [m async for m in ctx.channel.history(after=after, before=before, limit=500)]
-        for message in messages:
+
+        if not messages:
+            await ctx.reply("❌ Aucun message trouvé entre ces deux IDs.")
+            return
+
+        msg = await ctx.reply(f"🗑️ Suppression de {len(messages)} message(s) en cours...")
+
+        now = datetime.now(pytz.utc)
+        recent = [m for m in messages if (now - m.created_at).days < 14]
+        old = [m for m in messages if (now - m.created_at).days >= 14]
+
+        deleted = 0
+        errors = 0
+
+        # Bulk delete pour les messages < 14 jours (par lots de 100)
+        for i in range(0, len(recent), 100):
+            batch = recent[i:i+100]
+            try:
+                await ctx.channel.delete_messages(batch)
+                deleted += len(batch)
+            except Exception:
+                for m in batch:
+                    try:
+                        await m.delete()
+                        deleted += 1
+                    except Exception:
+                        errors += 1
+
+        # Un par un pour les messages > 14 jours
+        for i, message in enumerate(old):
             try:
                 await message.delete()
                 deleted += 1
             except Exception:
                 errors += 1
-        summary = f"✅ **Purge terminée** — {deleted} message(s) supprimé(s)."
+            if (i + 1) % 10 == 0:
+                await msg.edit(content=f"🗑️ Suppression en cours... {deleted}/{len(messages)}")
+
+        summary = f"✅ **Purge terminée** — {deleted}/{len(messages)} message(s) supprimé(s)."
         if errors:
-            summary += f"\n⚠️ {errors} message(s) n'ont pas pu être supprimés."
+            summary += f"\n⚠️ {errors} message(s) n'ont pas pu être supprimés (permissions manquantes ?)."
+        if old:
+            summary += f"\n📌 {len(old)} message(s) avaient +14 jours (suppression lente)."
         await msg.edit(content=summary)
+    except discord.Forbidden:
+        await ctx.reply("❌ Le bot n'a pas la permission **Gérer les messages** dans ce salon.")
     except Exception as e:
-        await msg.edit(content=f"❌ Erreur purge: {e}")
+        await ctx.reply(f"❌ Erreur purge: {e}")
 
 
 bot.run(DISCORD_TOKEN)

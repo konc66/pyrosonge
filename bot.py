@@ -2474,9 +2474,29 @@ async def aide(ctx: commands.Context):
         "💖 **Compliment auto** — tous les jours à 18h\n"
         "`!sondage \"question\"` — sondage avec réactions"
     ), inline=False)
-    embed.add_field(name="🔧 Admin", value=f"`!raid @joueurs` — récompense les participants d'un raid (+{RAID_REWARD} {FLAMTON})\n**Répondre** au message d'une run + `!supprun` — supprimer cette run\n`!reset` — réinitialiser toutes les runs\n`!backup` — sauvegarder la base\n`!restore` — restaurer depuis un backup\n`!purge <id_debut> <id_fin>` — supprimer les messages entre deux IDs\n(rôle {ADMIN_ROLE} requis)", inline=False)
+    embed.add_field(name="🔧 Admin", value=f"`!raid @joueurs` — récompense les participants d'un raid (+{RAID_REWARD} {FLAMTON})\n`!coins add/remove @joueur <montant>` — créditer/retirer des {FLAMTON}\n**Répondre** au message d'une run + `!supprun` — supprimer cette run\n`!reset` — réinitialiser toutes les runs\n`!backup` — sauvegarder la base\n`!restore` — restaurer depuis un backup\n`!purge <id_debut> <id_fin>` — supprimer les messages entre deux IDs\n(rôle {ADMIN_ROLE} requis)", inline=False)
 
     await ctx.reply(embed=embed)
+
+
+@bot.command(name="coins")
+async def coins_admin(ctx: commands.Context, action: str = "", target: discord.Member = None, montant: int = 0):
+    """!coins add/remove @joueur <montant> — Créditer ou retirer des Flamtons (admin)."""
+    is_admin = any(role.name == ADMIN_ROLE for role in ctx.author.roles) or ctx.author.guild_permissions.administrator
+    if not is_admin:
+        await ctx.reply(f"❌ Réservé aux **{ADMIN_ROLE}** / administrateurs.")
+        return
+    if action not in ("add", "remove") or not target or not montant or montant <= 0:
+        await ctx.reply("❌ Usage : `!coins add @joueur <montant>` ou `!coins remove @joueur <montant>`")
+        return
+    if action == "add":
+        new_bal = add_coins(target.id, montant)
+        await ctx.reply(f"✅ **+{montant}** {FLAMTON} crédités à {target.mention}. Nouveau solde : **{new_bal}** {FLAMTON}")
+    else:
+        bal = get_balance(target.id)
+        to_remove = min(montant, bal)
+        new_bal = add_coins(target.id, -to_remove)
+        await ctx.reply(f"✅ **-{to_remove}** {FLAMTON} retirés à {target.mention}. Nouveau solde : **{new_bal}** {FLAMTON}")
 
 
 @bot.command(name="backup")

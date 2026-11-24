@@ -1883,18 +1883,28 @@ async def buy(ctx: commands.Context, *, args: str = ""):
 
         add_coins(ctx.author.id, -price)
         old_nick = target.display_name
+        renamed = False
         try:
             await target.edit(nick=surnom)
+            renamed = True
             add_active_item(target.id, "rename", old_nick, 1)
             await ctx.reply(f"✏️ **{old_nick}** a été renommé en **{surnom}** pour 1h !\n💰 -{price} {FLAMTON} | Solde : {get_balance(ctx.author.id)} {FLAMTON}")
+        except Exception:
+            fun_ch = ctx.guild.get_channel(FUN_CHANNEL_ID) if FUN_CHANNEL_ID else ctx.channel
+            embed = discord.Embed(
+                title="✏️ Rename virtuel",
+                description=f"**{old_nick}** est désormais connu sous le nom de **{surnom}** pendant 1h !",
+                color=discord.Color.orange()
+            )
+            embed.set_footer(text=f"Rename acheté par {ctx.author.display_name}")
+            await (fun_ch or ctx.channel).send(f"@everyone", embed=embed)
+            await ctx.reply(f"✏️ Rename virtuel posté !\n💰 -{price} {FLAMTON} | Solde : {get_balance(ctx.author.id)} {FLAMTON}")
+        if renamed:
             await asyncio.sleep(3600)
             try:
                 await target.edit(nick=old_nick)
             except Exception:
                 pass
-        except Exception as e:
-            add_coins(ctx.author.id, price)
-            await ctx.reply(f"❌ Impossible de renommer : {e}")
         return
 
     # --- AVATAR (Joueur du jour) ---

@@ -1416,9 +1416,6 @@ def calculate_slot_payout(reels, bet):
 @bot.command(name="solde")
 async def solde(ctx: commands.Context):
     """!solde — Voir son solde de Flamtons."""
-    if CASINO_CHANNEL_ID and ctx.channel.id != CASINO_CHANNEL_ID:
-        if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
-            return
     balance = get_balance(ctx.author.id)
     daily = get_daily_earned(ctx.author.id)
     session = voice_sessions.get(ctx.author.id)
@@ -2462,23 +2459,35 @@ async def aide(ctx: commands.Context):
 
 
 @bot.command(name="coins")
-async def coins_admin(ctx: commands.Context, action: str = "", target: discord.Member = None, montant: int = 0):
-    """!coins add/remove @joueur <montant> — Créditer ou retirer des Flamtons (admin)."""
+async def coins_admin(ctx: commands.Context, action: str = "", *, args: str = ""):
+    """!coins add/remove @joueur(s) <montant> — Créditer ou retirer des Flamtons (admin)."""
     is_admin = any(role.name == ADMIN_ROLE for role in ctx.author.roles) or ctx.author.guild_permissions.administrator
     if not is_admin:
         await ctx.reply(f"❌ Réservé aux **{ADMIN_ROLE}** / administrateurs.")
         return
-    if action not in ("add", "remove") or not target or not montant or montant <= 0:
-        await ctx.reply("❌ Usage : `!coins add @joueur <montant>` ou `!coins remove @joueur <montant>`")
+    mentioned = [m for m in ctx.message.mentions if not m.bot]
+    parts = args.split()
+    montant = 0
+    for p in reversed(parts):
+        try:
+            montant = int(p)
+            break
+        except ValueError:
+            continue
+    if action not in ("add", "remove") or not mentioned or montant <= 0:
+        await ctx.reply("❌ Usage : `!coins add @joueur(s) <montant>` ou `!coins remove @joueur(s) <montant>`")
         return
-    if action == "add":
-        new_bal = add_coins(target.id, montant)
-        await ctx.reply(f"✅ **+{montant}** {FLAMTON} crédités à {target.mention}. Nouveau solde : **{new_bal}** {FLAMTON}")
-    else:
-        bal = get_balance(target.id)
-        to_remove = min(montant, bal)
-        new_bal = add_coins(target.id, -to_remove)
-        await ctx.reply(f"✅ **-{to_remove}** {FLAMTON} retirés à {target.mention}. Nouveau solde : **{new_bal}** {FLAMTON}")
+    lines = []
+    for target in mentioned:
+        if action == "add":
+            new_bal = add_coins(target.id, montant)
+            lines.append(f"✅ **+{montant}** {FLAMTON} → {target.mention} (solde : **{new_bal}**)")
+        else:
+            bal = get_balance(target.id)
+            to_remove = min(montant, bal)
+            new_bal = add_coins(target.id, -to_remove)
+            lines.append(f"✅ **-{to_remove}** {FLAMTON} → {target.mention} (solde : **{new_bal}**)")
+    await ctx.reply("\n".join(lines))
 
 
 @bot.command(name="backup")

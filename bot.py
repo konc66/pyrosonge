@@ -619,24 +619,8 @@ async def before_periodic_backup():
     await bot.wait_until_ready()
 
 
-async def first_boot_intro():
-    """Envoie un message d'intro dans chaque salon dédié — une seule fois, jamais après."""
-    conn = sqlite3.connect("save.db")
-    c = conn.cursor()
-    c.execute("SELECT value FROM bot_meta WHERE key='first_boot_done'")
-    row = c.fetchone()
-    if row:
-        conn.close()
-        return
-    c.execute("INSERT INTO bot_meta (key, value) VALUES ('first_boot_done', '1')")
-    conn.commit()
-    conn.close()
-
-    guild = bot.guilds[0] if bot.guilds else None
-    if not guild:
-        return
-
-    channels_info = {
+def _get_channels_info():
+    return {
         CASINO_CHANNEL_ID: {
             "title": "🎰 Bienvenue au Casino Pyrosonge !",
             "desc": (
@@ -687,7 +671,50 @@ async def first_boot_intro():
         },
     }
 
-    for channel_id, info in channels_info.items():
+
+@tasks.loop(hours=12)
+async def channel_help_reminder():
+    guild = bot.guilds[0] if bot.guilds else None
+    if not guild:
+        return
+    for channel_id, info in _get_channels_info().items():
+        if not channel_id:
+            continue
+        channel = guild.get_channel(channel_id)
+        if not channel:
+            continue
+        embed = discord.Embed(title=info["title"], description=info["desc"], color=info["color"])
+        embed.set_footer(text="Pyrosonge Bot — tape !aide n'importe où pour la liste complète")
+        try:
+            await channel.send(embed=embed)
+        except Exception as e:
+            print(f"[HELP-REMINDER] Erreur envoi {channel.name}: {e}")
+    print("[HELP-REMINDER] Rappels commandes envoyés dans les salons dédiés.")
+
+
+@channel_help_reminder.before_loop
+async def before_channel_help_reminder():
+    await bot.wait_until_ready()
+
+
+async def first_boot_intro():
+    """Envoie un message d'intro dans chaque salon dédié — une seule fois, jamais après."""
+    conn = sqlite3.connect("save.db")
+    c = conn.cursor()
+    c.execute("SELECT value FROM bot_meta WHERE key='first_boot_done'")
+    row = c.fetchone()
+    if row:
+        conn.close()
+        return
+    c.execute("INSERT INTO bot_meta (key, value) VALUES ('first_boot_done', '1')")
+    conn.commit()
+    conn.close()
+
+    guild = bot.guilds[0] if bot.guilds else None
+    if not guild:
+        return
+
+    for channel_id, info in _get_channels_info().items():
         if not channel_id:
             continue
         channel = guild.get_channel(channel_id)
@@ -743,6 +770,9 @@ async def on_ready():
     if not daily_compliment.is_running():
         daily_compliment.start()
         print("[COMPLIMENT] Compliment quotidien activé (18h).")
+    if not channel_help_reminder.is_running():
+        channel_help_reminder.start()
+        print("[HELP-REMINDER] Rappels commandes toutes les 12h activé.")
     try:
         synced = await bot.tree.sync()
         print(f"{len(synced)} commandes slash synchronisées")
@@ -1561,7 +1591,7 @@ async def coinflip(ctx: commands.Context, target: discord.Member = None, mise: i
         return
 
     flip_msg = await ctx.send(f"{FLAMTON} La pièce est lancée...")
-    animation = ["🪙", "💫", "✨", "💫", "🪙", "💫"]
+    animation = [FLAMTON, "💫", FLAMTON, "✨", FLAMTON, "💫"]
     for frame in animation:
         await asyncio.sleep(0.4)
         await flip_msg.edit(content=f"{frame} La pièce tourne...")
@@ -1849,7 +1879,7 @@ async def buy(ctx: commands.Context, *, args: str = ""):
         quiz_msg = await ctx.reply(embed=embed)
 
         def check_answer(m):
-            return m.channel.id == ctx.channel.id and m.author.id != ctx.author.id and not m.author.bot and answer.lower() in m.content.lower()
+            return m.channel.id == ctx.channel.id and not m.author.bot and answer.lower() in m.content.lower()
 
         if answer:
             try:

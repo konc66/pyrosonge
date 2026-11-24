@@ -1490,12 +1490,10 @@ async def slots(ctx: commands.Context, mise: int = 0):
     if payout > 0:
         gain = payout - mise
         embed = discord.Embed(title="🎰 Machine à sous", color=discord.Color.green())
-        embed.description = f"{result_line}\n\n✅ {desc}\n💰 **+{gain}** {FLAMTON} (gain net)"
+        embed.description = f"{result_line}\n\n✅ {desc}\n💰 **+{gain}** {FLAMTON} (gain net)\n\n💰 Solde : **{new_balance}** {FLAMTON}"
     else:
         embed = discord.Embed(title="🎰 Machine à sous", color=discord.Color.red())
-        embed.description = f"{result_line}\n\n❌ {desc}\n💸 **-{mise}** {FLAMTON}"
-
-    embed.set_footer(text=f"Solde : {new_balance} {FLAMTON}")
+        embed.description = f"{result_line}\n\n❌ {desc}\n💸 **-{mise}** {FLAMTON}\n\n💰 Solde : **{new_balance}** {FLAMTON}"
     await msg.edit(content=None, embed=embed)
 
 
@@ -1676,7 +1674,7 @@ async def roulette(ctx: commands.Context, mise: int = 0, *, choix: str = ""):
         )
 
     new_balance = get_balance(ctx.author.id)
-    embed.set_footer(text=f"Solde : {new_balance} {FLAMTON}")
+    embed.description += f"\n\n💰 Solde : **{new_balance}** {FLAMTON}"
     await msg.edit(content=None, embed=embed)
 
 
@@ -1797,7 +1795,7 @@ async def buy(ctx: commands.Context, *, args: str = ""):
         embed = discord.Embed(title="🔮 Boule Magique", color=discord.Color.dark_purple())
         embed.add_field(name="Question", value=question, inline=False)
         embed.add_field(name="Réponse", value=random.choice(responses), inline=False)
-        embed.set_footer(text=f"-{price} {FLAMTON} | Solde : {get_balance(ctx.author.id)} {FLAMTON}")
+        embed.description = f"-{price} {FLAMTON} | Solde : {get_balance(ctx.author.id)} {FLAMTON}"
         await ctx.reply(embed=embed)
         return
 
@@ -1827,7 +1825,7 @@ async def buy(ctx: commands.Context, *, args: str = ""):
             answer = "Abraknyde"
 
         embed = discord.Embed(title="❓ Devinette Dofus", description=riddle, color=discord.Color.orange())
-        embed.set_footer(text=f"Premier à répondre gagne 50 {FLAMTON} ! (-{price} {FLAMTON} pour {ctx.author.display_name})")
+        embed.description += f"\n\nPremier à répondre gagne 50 {FLAMTON} ! (-{price} {FLAMTON} pour {ctx.author.display_name})"
         quiz_msg = await ctx.reply(embed=embed)
 
         def check_answer(m):
@@ -1958,7 +1956,7 @@ async def buy(ctx: commands.Context, *, args: str = ""):
             description=texte,
             color=discord.Color.blue()
         )
-        embed.set_footer(text=f"Bannière (7 jours) | -{price} {FLAMTON}")
+        embed.description += f"\n\n📌 Bannière (7 jours) | -{price} {FLAMTON}"
         banner_msg = await ctx.reply(embed=embed)
         try:
             await banner_msg.pin()

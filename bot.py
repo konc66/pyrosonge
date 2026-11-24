@@ -81,7 +81,7 @@ SHOP_ROLES = {
     "diamant": {"price": 3000, "days": 30, "discount": 0.30, "role_name": "💎 • Diamant"},
 }
 SHOP_ITEMS = {
-    "8ball": 50, "devinette": 75, "rename": 100, "avatar": 150,
+    "8ball": 50, "devinette": 75, "rename": 150, "avatar": 75,
     "immunity": 250, "banner": 500, "nidas": 5000, "kamas1m": 6000, "kamas5m": 25000,
 }
 
@@ -663,7 +663,7 @@ def _get_channels_info():
                 "**Besoin d'aide ? Crée un ticket :**\n"
                 "`!entraide <ta demande>`\n\n"
                 "**Exemple :** `!entraide Besoin d'aide pour Nidas, lvl 180 enu`\n\n"
-                "Le bot crée un ticket privé. Un membre tape `!prendre` pour te rejoindre.\n"
+                "Le bot crée un ticket privé. Un membre réagit ✅ sur l'annonce pour te rejoindre.\n"
                 "Le créateur, le helper ou un admin peut fermer avec `!fermer`.\n\n"
                 f"🚫 Toute tentative de génération abusive de {FLAMTON} (AFK, exploit, faux tickets, multicompte...) sera sanctionnée."
             ),
@@ -1754,8 +1754,8 @@ async def shop(ctx: commands.Context):
     embed.add_field(name="🎲 Tier 1 — Fun Discord", value=(
         f"`!buy 8ball \"question\"` — 50 {FLAMTON}\n"
         f"`!buy devinette` — 75 {FLAMTON}\n"
-        f"`!buy rename @joueur \"surnom\"` — 100 {FLAMTON}\n"
-        f"`!buy avatar` — 150 {FLAMTON}\n"
+        f"`!buy rename @joueur \"surnom\"` — 150 {FLAMTON}\n"
+        f"`!buy avatar` — 75 {FLAMTON}\n"
         f"`!buy immunity` — 250 {FLAMTON}"
     ), inline=False)
 
@@ -1851,6 +1851,21 @@ async def buy(ctx: commands.Context, *, args: str = ""):
             "🔮 Demande plus tard...", "🔮 Je ne peux pas répondre maintenant.",
             "🔮 N'y compte pas.", "🔮 Les chances sont faibles.", "🔮 Non.", "🔮 Très douteux.",
             "🔮 Ça sent le cramé.", "🔮 Dofus dit non.", "🔮 Les Songes sont flous...",
+            "🔮 Même un Tofu saurait la réponse... et c'est oui.",
+            "🔮 Tu veux une réponse ou un câlin ? Dans le doute : oui.",
+            "🔮 J'ai consulté un Abraknyde — il a dit non.",
+            "🔮 T'es sérieux ? Évidemment que oui.",
+            "🔮 Les dieux de Pandala ont voté : non.",
+            "🔮 Aussi probable qu'un drop de Dofus au premier run.",
+            "🔮 Sacrier à 200% — OUI.",
+            "🔮 C'est un non, mais un non avec style.",
+            "🔮 Mes cartes disent oui, mon instinct dit fuis.",
+            "🔮 Réponse sponsorisée par la Mafia Nidas : absolument.",
+            "🔮 Si t'y crois assez fort... non, c'est toujours non.",
+            "🔮 Faut être fou pour poser cette question. Et oui.",
+            "🔮 Les Flamtons sont formels : OUIIII.",
+            "🔮 Mon Eniripsa intérieur dit : prends soin de toi et non.",
+            "🔮 100%. Pas 99, pas 101. Pile 100%.",
         ]
         embed = discord.Embed(title="🔮 Boule Magique", color=discord.Color.dark_purple())
         embed.add_field(name="Question", value=question, inline=False)
@@ -1869,9 +1884,11 @@ async def buy(ctx: commands.Context, *, args: str = ""):
         add_coins(ctx.author.id, -price)
         try:
             result = generate_text_gemini(
-                "Génère une devinette sur l'univers Dofus (monstres, donjons, classes, sorts, zones). "
-                "Format : une ligne pour la devinette, puis 'Réponse: ...' sur la ligne suivante. "
-                "La devinette doit être fun et pas trop difficile. En français."
+                "Génère une devinette courte sur l'univers Dofus (monstres, donjons, classes, sorts, zones, PNJ). "
+                "La réponse doit être UN SEUL MOT ou un nom propre simple (ex: Iop, Abraknyde, Bonta, Nidas, Tofu, Pandala). "
+                "Pas de phrase longue en réponse. "
+                "Format STRICT :\nLigne 1 : la devinette\nLigne 2 : Réponse: <un mot>\n"
+                "La devinette doit être fun, claire, et la réponse évidente pour un joueur Dofus. En français."
             )
             lines = result.strip().split("\n")
             riddle = lines[0].strip()
@@ -2057,12 +2074,15 @@ async def buy(ctx: commands.Context, *, args: str = ""):
             ctx.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True),
         }
         for role in ctx.guild.roles:
-            if role.name == ADMIN_ROLE:
+            if role.name == ADMIN_ROLE or role.name == "Mafia Nidas":
                 overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+
+        category = ctx.guild.get_channel(ENTRAIDE_CATEGORY_ID) if ENTRAIDE_CATEGORY_ID else None
 
         try:
             ticket = await ctx.guild.create_text_channel(
                 f"pl-nidas-{ctx.author.display_name}".lower().replace(" ", "-"),
+                category=category,
                 overwrites=overwrites,
                 reason="Achat PL Nidas boutique"
             )
@@ -2196,7 +2216,7 @@ async def entraide(ctx: commands.Context, *, description: str = ""):
         ticket_embed.description = (
             f"**Joueur :** {ctx.author.mention}\n"
             f"**Demande :** {description}\n\n"
-            f"⏳ En attente d'un helper... Quelqu'un doit taper `!prendre` dans <#{ENTRAIDE_CHANNEL_ID}> pour te rejoindre.\n"
+            f"⏳ En attente d'un helper... Quelqu'un doit réagir ✅ sur l'annonce dans <#{ENTRAIDE_CHANNEL_ID}> pour te rejoindre.\n"
             f"Le créateur, le helper ou un admin peut fermer avec `!fermer`.\n\n"
             f"⚠️ **L'entraide existe pour jouer ensemble, pas pour profiter des autres.** "
             f"Tout abus sera sanctionné par les admins.\n\n"
@@ -2211,10 +2231,11 @@ async def entraide(ctx: commands.Context, *, description: str = ""):
         annonce_embed.description = (
             f"**Joueur :** {ctx.author.mention}\n"
             f"**Demande :** {description}\n\n"
-            f"👉 **Réponds à ce message avec `!prendre` pour prendre en charge cette demande.**"
+            f"👉 **Réagis avec ✅ pour prendre en charge cette demande.**"
         )
         annonce_embed.set_footer(text=f"Ticket : {ticket.name}")
         annonce_msg = await ctx.reply(embed=annonce_embed)
+        await annonce_msg.add_reaction("✅")
 
         # Stocker le lien annonce → ticket dans bot_meta
         conn = sqlite3.connect("save.db")
@@ -2327,6 +2348,84 @@ async def prendre(ctx: commands.Context):
         pass
 
     await confirm_msg.edit(content=f"✅ Tu as rejoint le ticket {ticket.mention} !")
+
+
+@bot.event
+async def on_raw_reaction_add(payload):
+    if payload.user_id == bot.user.id:
+        return
+    if str(payload.emoji) != "✅":
+        return
+    if ENTRAIDE_CHANNEL_ID and payload.channel_id != ENTRAIDE_CHANNEL_ID:
+        return
+
+    conn = sqlite3.connect("save.db")
+    c = conn.cursor()
+    c.execute("SELECT value FROM bot_meta WHERE key = ?", (f"entraide_ticket_{payload.message_id}",))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return
+
+    parts = row[0].split("|")
+    ticket_id = int(parts[0])
+    creator_id = int(parts[1])
+
+    if payload.user_id == creator_id:
+        return
+
+    guild = bot.get_guild(payload.guild_id)
+    if not guild:
+        return
+    member = guild.get_member(payload.user_id)
+    if not member or member.bot:
+        return
+
+    ticket = guild.get_channel(ticket_id)
+    if not ticket:
+        return
+
+    conn = sqlite3.connect("save.db")
+    c = conn.cursor()
+    c.execute("SELECT value FROM bot_meta WHERE key = ?", (f"entraide_helper_{ticket_id}",))
+    existing = c.fetchone()
+    if existing:
+        conn.close()
+        return
+
+    try:
+        await ticket.set_permissions(member, read_messages=True, send_messages=True)
+    except Exception:
+        conn.close()
+        return
+
+    c.execute("INSERT OR REPLACE INTO bot_meta (key, value) VALUES (?, ?)",
+              (f"entraide_helper_{ticket_id}", str(member.id)))
+    conn.commit()
+    conn.close()
+
+    await ticket.send(
+        f"✅ **{member.mention} prend en charge cette demande !**\n"
+        f"Vous pouvez discuter ici. Tapez `!fermer` quand c'est terminé."
+    )
+
+    channel = guild.get_channel(payload.channel_id)
+    if channel:
+        try:
+            annonce_msg = await channel.fetch_message(payload.message_id)
+            if annonce_msg.embeds:
+                updated_embed = annonce_msg.embeds[0].copy()
+                desc = updated_embed.description or ""
+                demande_part = desc.split("**Demande :** ")[1].split("\n")[0] if "**Demande :** " in desc else "..."
+                updated_embed.description = (
+                    f"**Joueur :** <@{creator_id}>\n"
+                    f"**Demande :** {demande_part}\n\n"
+                    f"✅ **Pris en charge par {member.mention}**"
+                )
+                updated_embed.color = discord.Color.green()
+                await annonce_msg.edit(embed=updated_embed)
+        except Exception:
+            pass
 
 
 @bot.command(name="fermer")
@@ -2535,7 +2634,7 @@ async def aide(ctx: commands.Context):
     ), inline=False)
     embed.add_field(name="🤝 Entraide", value=(
         "`!entraide <demande>` — crée un ticket privé\n"
-        "`!prendre` — réponds à une annonce pour aider\n"
+        "✅ Réagis sur une annonce d'entraide pour aider\n"
         "`!fermer` — ferme un ticket (créateur, helper ou admin)"
     ), inline=False)
     embed.add_field(name="🎉 Fun", value=(

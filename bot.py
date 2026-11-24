@@ -38,6 +38,7 @@ ADMIN_NOTIFY_CHANNEL_ID = int(os.environ.get("ADMIN_NOTIFY_CHANNEL_ID", "0")) or
 GUILD_MEMBER_ROLE_ID = int(os.environ.get("GUILD_MEMBER_ROLE_ID", "0")) or None
 FUN_CHANNEL_ID = int(os.environ.get("FUN_CHANNEL_ID", "0")) or None
 ENTRAIDE_CHANNEL_ID = int(os.environ.get("ENTRAIDE_CHANNEL_ID", "0")) or None
+ENTRAIDE_CATEGORY_ID = int(os.environ.get("ENTRAIDE_CATEGORY_ID", "0")) or None
 FLAMTON = os.environ.get("FLAMTON_EMOJI", "🪙")
 TIMEZONE = pytz.timezone("Europe/Paris")
 
@@ -680,8 +681,8 @@ async def first_boot_intro():
                 "**Besoin d'aide ? Crée un ticket :**\n"
                 "`!entraide <ta demande>`\n\n"
                 "**Exemple :** `!entraide Besoin d'aide pour Nidas, lvl 180 enu`\n\n"
-                "Le bot crée un salon privé visible par toute la guilde.\n"
-                "Un admin ou le créateur peut fermer avec `!fermer`.\n\n"
+                "Le bot crée un ticket privé. Un membre tape `!prendre` pour te rejoindre.\n"
+                "Le créateur, le helper ou un admin peut fermer avec `!fermer`.\n\n"
                 f"🚫 Toute tentative de génération abusive de {FLAMTON} (AFK, exploit, faux tickets, multicompte...) sera sanctionnée."
             ),
             "color": discord.Color.teal(),
@@ -2099,7 +2100,7 @@ async def don(ctx: commands.Context, target: discord.Member = None, montant: int
 
 @bot.command(name="entraide")
 async def entraide(ctx: commands.Context, *, description: str = ""):
-    """!entraide <description> — Crée un ticket d'entraide visible par la guilde."""
+    """!entraide <description> — Crée un ticket d'entraide privé."""
     if ENTRAIDE_CHANNEL_ID and ctx.channel.id != ENTRAIDE_CHANNEL_ID:
         await ctx.reply(f"❌ Utilise <#{ENTRAIDE_CHANNEL_ID}> pour l'entraide.", delete_after=5)
         return
@@ -2107,65 +2108,227 @@ async def entraide(ctx: commands.Context, *, description: str = ""):
         await ctx.reply("❌ Usage : `!entraide <ta demande>`\nEx: `!entraide Besoin d'aide pour le donjon Nidas, je suis lvl 180 enu`")
         return
 
-    if not GUILD_MEMBER_ROLE_ID:
-        await ctx.reply("❌ Rôle guilde non configuré.")
-        return
-
-    guild_role = ctx.guild.get_role(GUILD_MEMBER_ROLE_ID)
-    if not guild_role:
-        await ctx.reply("❌ Rôle guilde introuvable.")
-        return
-
+    # Permissions : créateur + admins + bot seulement (pas la guilde entière)
     overwrites = {
         ctx.guild.default_role: discord.PermissionOverwrite(read_messages=False),
         ctx.author: discord.PermissionOverwrite(read_messages=True, send_messages=True),
         ctx.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-        guild_role: discord.PermissionOverwrite(read_messages=True, send_messages=True),
     }
     for role in ctx.guild.roles:
         if role.name == ADMIN_ROLE:
             overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
 
+    # Créer dans la catégorie dédiée si configurée
+    category = ctx.guild.get_channel(ENTRAIDE_CATEGORY_ID) if ENTRAIDE_CATEGORY_ID else None
+
     try:
         ticket = await ctx.guild.create_text_channel(
             f"entraide-{ctx.author.display_name}".lower().replace(" ", "-")[:50],
+            category=category,
             overwrites=overwrites,
             reason="Demande d'entraide"
         )
-        embed = discord.Embed(title="🤝 Demande d'entraide", color=discord.Color.teal())
-        embed.description = (
+
+        # Message dans le ticket
+        ticket_embed = discord.Embed(title="🤝 Demande d'entraide", color=discord.Color.teal())
+        ticket_embed.description = (
             f"**Joueur :** {ctx.author.mention}\n"
             f"**Demande :** {description}\n\n"
-            f"Les membres de la guilde peuvent répondre ici.\n"
-            f"Le créateur ou un admin peut fermer avec `!fermer`.\n\n"
+            f"⏳ En attente d'un helper... Quelqu'un doit taper `!prendre` dans <#{ENTRAIDE_CHANNEL_ID}> pour te rejoindre.\n"
+            f"Le créateur, le helper ou un admin peut fermer avec `!fermer`.\n\n"
             f"⚠️ **L'entraide existe pour jouer ensemble, pas pour profiter des autres.** "
             f"Tout abus sera sanctionné par les admins.\n\n"
             f"🚫 **Toute tentative de génération abusive de {FLAMTON} est interdite** : "
             f"AFK farming, exploitation du système vocal, faux tickets, multicompte, "
             f"ou tout autre moyen détourné. Les admins surveillent et sanctionnent."
         )
-        await ticket.send(f"{guild_role.mention}", embed=embed)
-        await ctx.reply(f"✅ Ticket d'entraide créé : {ticket.mention}")
+        await ticket.send(embed=ticket_embed)
+
+        # Annonce dans #entraide pour que quelqu'un prenne en charge
+        annonce_embed = discord.Embed(title="🆘 Nouvelle demande d'entraide", color=discord.Color.teal())
+        annonce_embed.description = (
+            f"**Joueur :** {ctx.author.mention}\n"
+            f"**Demande :** {description}\n\n"
+            f"👉 **Réponds à ce message avec `!prendre` pour prendre en charge cette demande.**"
+        )
+        annonce_embed.set_footer(text=f"Ticket : {ticket.name}")
+        annonce_msg = await ctx.reply(embed=annonce_embed)
+
+        # Stocker le lien annonce → ticket dans bot_meta
+        conn = sqlite3.connect("songe.db")
+        c = conn.cursor()
+        c.execute("INSERT INTO bot_meta (key, value) VALUES (?, ?)",
+                  (f"entraide_ticket_{annonce_msg.id}", f"{ticket.id}|{ctx.author.id}"))
+        conn.commit()
+        conn.close()
+
     except Exception as e:
         await ctx.reply(f"❌ Erreur création ticket : {e}")
 
 
+@bot.command(name="prendre")
+async def prendre(ctx: commands.Context):
+    """!prendre — Réponds à une annonce d'entraide pour prendre en charge la demande."""
+    if ENTRAIDE_CHANNEL_ID and ctx.channel.id != ENTRAIDE_CHANNEL_ID:
+        return
+
+    ref = ctx.message.reference
+    if not ref or not ref.message_id:
+        await ctx.reply("❌ Réponds au message d'annonce d'entraide avec `!prendre`.", delete_after=5)
+        return
+
+    # Récupérer le ticket lié
+    conn = sqlite3.connect("songe.db")
+    c = conn.cursor()
+    c.execute("SELECT value FROM bot_meta WHERE key = ?", (f"entraide_ticket_{ref.message_id}",))
+    row = c.fetchone()
+    conn.close()
+
+    if not row:
+        await ctx.reply("❌ Ce message n'est pas une annonce d'entraide.", delete_after=5)
+        return
+
+    parts = row[0].split("|")
+    ticket_id = int(parts[0])
+    creator_id = int(parts[1])
+
+    if ctx.author.id == creator_id:
+        await ctx.reply("❌ Tu ne peux pas prendre en charge ta propre demande.", delete_after=5)
+        return
+
+    ticket = ctx.guild.get_channel(ticket_id)
+    if not ticket:
+        await ctx.reply("❌ Le ticket a été supprimé.", delete_after=5)
+        return
+
+    # Vérifier si déjà pris en charge
+    conn = sqlite3.connect("songe.db")
+    c = conn.cursor()
+    c.execute("SELECT value FROM bot_meta WHERE key = ?", (f"entraide_helper_{ticket_id}",))
+    existing = c.fetchone()
+    conn.close()
+    if existing:
+        await ctx.reply("❌ Cette demande est déjà prise en charge.", delete_after=5)
+        return
+
+    # Confirmation (2 min)
+    creator = ctx.guild.get_member(creator_id)
+    creator_name = creator.display_name if creator else "le joueur"
+    confirm_msg = await ctx.reply(
+        f"✋ {ctx.author.mention}, tu confirmes prendre en charge la demande de **{creator_name}** ?\n"
+        f"Réagis ✅ pour confirmer (2 min)."
+    )
+    await confirm_msg.add_reaction("✅")
+
+    def check(reaction, user):
+        return user.id == ctx.author.id and str(reaction.emoji) == "✅" and reaction.message.id == confirm_msg.id
+
+    try:
+        await bot.wait_for("reaction_add", timeout=120.0, check=check)
+    except Exception:
+        await confirm_msg.edit(content=f"⏰ {ctx.author.display_name} n'a pas confirmé à temps.")
+        return
+
+    # Ajouter le helper au ticket
+    try:
+        await ticket.set_permissions(ctx.author, read_messages=True, send_messages=True)
+    except Exception as e:
+        await confirm_msg.edit(content=f"❌ Erreur d'ajout au ticket : {e}")
+        return
+
+    # Enregistrer le helper
+    conn = sqlite3.connect("songe.db")
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO bot_meta (key, value) VALUES (?, ?)",
+              (f"entraide_helper_{ticket_id}", str(ctx.author.id)))
+    conn.commit()
+    conn.close()
+
+    # Message dans le ticket
+    await ticket.send(
+        f"✅ **{ctx.author.mention} prend en charge cette demande !**\n"
+        f"Vous pouvez discuter ici. Tapez `!fermer` quand c'est terminé."
+    )
+
+    # Mettre à jour l'annonce
+    try:
+        annonce_msg = await ctx.channel.fetch_message(ref.message_id)
+        updated_embed = annonce_msg.embeds[0].copy()
+        updated_embed.description = (
+            f"**Joueur :** <@{creator_id}>\n"
+            f"**Demande :** {updated_embed.description.split('Demande :** ')[1].split(chr(10))[0]}\n\n"
+            f"✅ **Pris en charge par {ctx.author.mention}**"
+        )
+        updated_embed.color = discord.Color.green()
+        await annonce_msg.edit(embed=updated_embed)
+    except Exception:
+        pass
+
+    await confirm_msg.edit(content=f"✅ Tu as rejoint le ticket {ticket.mention} !")
+
+
 @bot.command(name="fermer")
 async def fermer(ctx: commands.Context):
-    """!fermer — Ferme un ticket (entraide/nidas). Admin ou créateur du ticket."""
+    """!fermer — Ferme un ticket (entraide/nidas). Créateur, helper ou admin."""
     if not ctx.channel.name.startswith(("entraide-", "pl-nidas-")):
         await ctx.reply("❌ Cette commande ne fonctionne que dans un ticket.")
         return
+
     is_admin = any(role.name == ADMIN_ROLE for role in ctx.author.roles) or ctx.author.guild_permissions.administrator
-    # Le créateur est le premier mentionné dans le premier message
-    is_creator = False
+
+    # Trouver le créateur (premier mentionné dans le premier embed)
+    creator_id = None
     async for msg in ctx.channel.history(limit=1, oldest_first=True):
-        if ctx.author.mentioned_in(msg):
-            is_creator = True
-    if not is_admin and not is_creator:
-        await ctx.reply(f"❌ Seul un admin ({ADMIN_ROLE}) ou le créateur du ticket peut fermer.")
+        if msg.embeds:
+            desc = msg.embeds[0].description or ""
+            mention_match = re.search(r'<@!?(\d+)>', desc)
+            if mention_match:
+                creator_id = int(mention_match.group(1))
+
+    # Trouver le helper
+    helper_id = None
+    conn = sqlite3.connect("songe.db")
+    c = conn.cursor()
+    c.execute("SELECT value FROM bot_meta WHERE key = ?", (f"entraide_helper_{ctx.channel.id}",))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        helper_id = int(row[0])
+
+    is_creator = ctx.author.id == creator_id
+    is_helper = ctx.author.id == helper_id
+
+    if not is_admin and not is_creator and not is_helper:
+        await ctx.reply(f"❌ Seul le créateur, le helper ou un admin ({ADMIN_ROLE}) peut fermer ce ticket.")
         return
-    await ctx.reply("🔒 Ticket fermé. Suppression dans 10 secondes...")
+
+    # Confirmation de fermeture
+    confirm_msg = await ctx.reply(
+        f"🔒 {ctx.author.mention}, tu confirmes la fermeture de ce ticket ?\n"
+        f"Réagis ✅ pour confirmer (2 min)."
+    )
+    await confirm_msg.add_reaction("✅")
+
+    def check(reaction, user):
+        return user.id == ctx.author.id and str(reaction.emoji) == "✅" and reaction.message.id == confirm_msg.id
+
+    try:
+        await bot.wait_for("reaction_add", timeout=120.0, check=check)
+    except Exception:
+        await confirm_msg.edit(content="⏰ Fermeture annulée (pas de confirmation).")
+        return
+
+    await ctx.reply("🔒 **Ticket fermé.** Suppression dans 10 secondes...")
+
+    # Nettoyage bot_meta
+    conn = sqlite3.connect("songe.db")
+    c = conn.cursor()
+    c.execute("DELETE FROM bot_meta WHERE key LIKE ?", (f"entraide_%_{ctx.channel.id}",))
+    c.execute("DELETE FROM bot_meta WHERE key LIKE ? AND value LIKE ?",
+              (f"entraide_ticket_%", f"{ctx.channel.id}|%"))
+    conn.commit()
+    conn.close()
+
     await asyncio.sleep(10)
     try:
         await ctx.channel.delete(reason="Ticket fermé")
@@ -2302,8 +2465,9 @@ async def aide(ctx: commands.Context):
         f"`!don @joueur <montant>` — don direct (max {DON_MAX_DAILY}/jour)"
     ), inline=False)
     embed.add_field(name="🤝 Entraide", value=(
-        "`!entraide <demande>` — crée un ticket visible par la guilde\n"
-        "`!fermer` — ferme un ticket (créateur ou admin)"
+        "`!entraide <demande>` — crée un ticket privé\n"
+        "`!prendre` — réponds à une annonce pour aider\n"
+        "`!fermer` — ferme un ticket (créateur, helper ou admin)"
     ), inline=False)
     embed.add_field(name="🎉 Fun", value=(
         "🔥 **Roast auto** — tous les jours à 12h\n"

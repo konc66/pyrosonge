@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 import sqlite3
 import base64
@@ -314,11 +314,31 @@ async def auto_backup(source_channel):
         print(f"[AUTO-BACKUP] Erreur: {e}")
 
 
+@tasks.loop(hours=6)
+async def periodic_backup():
+    """Backup automatique toutes les 6h."""
+    target = bot.get_channel(BACKUP_CHANNEL_ID) if BACKUP_CHANNEL_ID else None
+    if not target:
+        print("[PERIODIC-BACKUP] BACKUP_CHANNEL_ID non configuré, skip.")
+        return
+    print("[PERIODIC-BACKUP] Lancement du backup périodique...")
+    await auto_backup(target)
+    print("[PERIODIC-BACKUP] Backup périodique terminé.")
+
+
+@periodic_backup.before_loop
+async def before_periodic_backup():
+    await bot.wait_until_ready()
+
+
 @bot.event
 async def on_ready():
     await auto_restore()
     init_db()
     print(f"Bot connecté: {bot.user}")
+    if not periodic_backup.is_running():
+        periodic_backup.start()
+        print("[PERIODIC-BACKUP] Tâche planifiée toutes les 6h.")
     try:
         synced = await bot.tree.sync()
         print(f"{len(synced)} commandes slash synchronisées")

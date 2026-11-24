@@ -29,6 +29,7 @@ _channels_raw = os.environ.get("ALLOWED_CHANNEL_IDS", os.environ.get("ALLOWED_CH
 ALLOWED_CHANNEL_IDS = [int(c.strip()) for c in _channels_raw.split(",") if c.strip()]
 
 ADMIN_ROLE = os.environ.get("ADMIN_ROLE_NAME", os.environ.get("ADMIN_ROLE", "PyroAdmin"))
+BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", "0")) or None
 TIMEZONE = pytz.timezone("Europe/Paris")
 
 # --- Events config ---
@@ -259,8 +260,63 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
+async def auto_restore():
+    """Cherche le dernier backup dans le channel dédié et restaure la DB."""
+    search_channels = [BACKUP_CHANNEL_ID] if BACKUP_CHANNEL_ID else ALLOWED_CHANNEL_IDS
+    for channel_id in search_channels:
+        channel = bot.get_channel(channel_id)
+        if not channel:
+            continue
+        try:
+            async for message in channel.history(limit=200):
+                if message.author != bot.user:
+                    continue
+                for att in message.attachments:
+                    if att.filename == "songe.db":
+                        print(f"[AUTO-RESTORE] Backup trouvé dans #{channel.name} ({att.filename}, {att.size} bytes)")
+                        db_bytes = await att.read()
+                        with open("songe.db", "wb") as f:
+                            f.write(db_bytes)
+                        conn_test = sqlite3.connect("songe.db")
+                        conn_test.execute("SELECT count(*) FROM runs")
+                        conn_test.close()
+                        print("[AUTO-RESTORE] Base restaurée avec succès.")
+                        return True
+        except Exception as e:
+            print(f"[AUTO-RESTORE] Erreur sur channel {channel_id}: {e}")
+    print("[AUTO-RESTORE] Aucun backup trouvé, utilisation de la DB locale.")
+    return False
+
+
+async def auto_backup(source_channel):
+    """Envoie la DB dans le channel backup dédié, puis purge les anciens backups."""
+    target = bot.get_channel(BACKUP_CHANNEL_ID) if BACKUP_CHANNEL_ID else source_channel
+    if not target:
+        print("[AUTO-BACKUP] Channel backup introuvable.")
+        return
+    try:
+        old_backups = []
+        async for message in target.history(limit=200):
+            if message.author == bot.user and any(att.filename == "songe.db" for att in message.attachments):
+                old_backups.append(message)
+
+        await target.send(
+            "💾 Backup auto",
+            file=discord.File("songe.db", filename="songe.db")
+        )
+
+        for old_msg in old_backups:
+            try:
+                await old_msg.delete()
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"[AUTO-BACKUP] Erreur: {e}")
+
+
 @bot.event
 async def on_ready():
+    await auto_restore()
     init_db()
     print(f"Bot connecté: {bot.user}")
     try:
@@ -393,6 +449,8 @@ async def handle_run(ctx: commands.Context, event_type: str):
                     names = ", ".join(m.mention for m in record_holders)
                     msg_record = f"🚨 **NOUVEAU RECORD !** {names} viennent de battre leur record personnel ! **{temps_display}** 🔥"
                 await ctx.channel.send(msg_record)
+
+        await auto_backup(ctx.channel)
 
     except Exception as e:
         await msg.edit(content=f"❌ Erreur: {e}")
@@ -745,7 +803,7 @@ async def aide(ctx: commands.Context):
     embed.add_field(name="🏆 Classements", value="`!classement` — classement Songe\n`!classement bolgrot` — classement Bolgrot", inline=False)
     embed.add_field(name="📊 Stats", value="`!stats @joueur` — stats d'un joueur\n`!historique @joueur` — historique des runs", inline=False)
     embed.add_field(name="📅 Événements", value="`!event` — événements en cours\n`!inscrits` — liste des inscrits", inline=False)
-    embed.add_field(name="🔧 Admin", value=f"**Répondre** au message d'une run + `!supprun` — supprimer cette run\n`!reset` — réinitialiser toutes les runs\n`!backup` — sauvegarder la base\n`!restore` — restaurer depuis un backup\n(rôle {ADMIN_ROLE} requis)", inline=False)
+    embed.add_field(name="🔧 Admin", value=f"**Répondre** au message d'une run + `!supprun` — supprimer cette run\n`!reset` — réinitialiser toutes les runs\n`!backup` — sauvegarder la base\n`!restore` — restaurer depuis un backup\n`!purge <id_debut> <id_fin>` — supprimer les messages entre deux IDs\n(rôle {ADMIN_ROLE} requis)", inline=False)
 
     await ctx.reply(embed=embed)
 
@@ -813,6 +871,46 @@ async def restore(ctx: commands.Context):
         await ctx.reply(f"✅ **Base restaurée !** {nb_runs} runs, {nb_players} joueurs récupérés.")
     except Exception as e:
         await ctx.reply(f"❌ Erreur restore: {e}")
+
+
+@bot.command(name="purge")
+async def purge(ctx: commands.Context, id_debut: int = 0, id_fin: int = 0):
+    """!purge <id_debut> <id_fin> — Supprime les messages entre deux IDs (admin)."""
+    if ctx.channel.id not in ALLOWED_CHANNEL_IDS and ctx.channel.id != BACKUP_CHANNEL_ID:
+        return
+
+    is_admin = any(role.name == ADMIN_ROLE for role in ctx.author.roles) or ctx.author.guild_permissions.administrator
+    if not is_admin:
+        await ctx.reply(f"❌ Tu dois avoir le rôle **{ADMIN_ROLE}** ou être administrateur.")
+        return
+
+    if not id_debut or not id_fin:
+        await ctx.reply("❌ Usage : `!purge <id_message_debut> <id_message_fin>`\n"
+                         "💡 Active le mode développeur Discord pour copier les IDs (clic droit → Copier l'identifiant).")
+        return
+
+    if id_debut > id_fin:
+        id_debut, id_fin = id_fin, id_debut
+
+    msg = await ctx.reply("🗑️ Suppression en cours...")
+    deleted = 0
+    errors = 0
+    try:
+        after = discord.Object(id=id_debut - 1)
+        before = discord.Object(id=id_fin + 1)
+        messages = [m async for m in ctx.channel.history(after=after, before=before, limit=500)]
+        for message in messages:
+            try:
+                await message.delete()
+                deleted += 1
+            except Exception:
+                errors += 1
+        summary = f"✅ **Purge terminée** — {deleted} message(s) supprimé(s)."
+        if errors:
+            summary += f"\n⚠️ {errors} message(s) n'ont pas pu être supprimés."
+        await msg.edit(content=summary)
+    except Exception as e:
+        await msg.edit(content=f"❌ Erreur purge: {e}")
 
 
 bot.run(DISCORD_TOKEN)

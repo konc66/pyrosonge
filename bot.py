@@ -53,7 +53,6 @@ SLOTS_MAX_BET = 500
 ROULETTE_MIN_BET = 10
 ROULETTE_MAX_BET = 500
 COINFLIP_MAX_BET = 500
-CASINO_DAILY_LOSS_CAP = 2000
 
 # --- Don config ---
 DON_MIN = 50
@@ -184,14 +183,6 @@ def init_db():
             item_type TEXT NOT NULL,
             data TEXT,
             expires_at TEXT NOT NULL
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS casino_daily_loss (
-            discord_id INTEGER NOT NULL,
-            date TEXT NOT NULL,
-            lost INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (discord_id, date)
         )
     """)
     c.execute("""
@@ -400,27 +391,6 @@ def add_daily_earned(discord_id: int, amount: int):
     conn = sqlite3.connect("save.db")
     c = conn.cursor()
     c.execute("INSERT INTO coin_daily (discord_id, date, earned) VALUES (?, ?, ?) ON CONFLICT(discord_id, date) DO UPDATE SET earned = earned + ?",
-              (discord_id, today, amount, amount))
-    conn.commit()
-    conn.close()
-
-
-# --- Casino loss tracking ---
-def get_daily_loss(discord_id: int) -> int:
-    today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
-    conn = sqlite3.connect("save.db")
-    c = conn.cursor()
-    c.execute("SELECT lost FROM casino_daily_loss WHERE discord_id = ? AND date = ?", (discord_id, today))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else 0
-
-
-def add_daily_loss(discord_id: int, amount: int):
-    today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
-    conn = sqlite3.connect("save.db")
-    c = conn.cursor()
-    c.execute("INSERT INTO casino_daily_loss (discord_id, date, lost) VALUES (?, ?, ?) ON CONFLICT(discord_id, date) DO UPDATE SET lost = lost + ?",
               (discord_id, today, amount, amount))
     conn.commit()
     conn.close()
@@ -966,6 +936,18 @@ async def before_check_expired_items():
     await bot.wait_until_ready()
 
 
+# --- Récompense event ---
+def compute_event_reward(intensite: str, resultat: str) -> int:
+    """Flamtons attribués à chaque joueur d'une run selon l'intensité/résultat (0 si intensité hors barème)."""
+    multiplier = EVENT_DIFFICULTY_MULTIPLIERS.get((intensite or "").lower().strip())
+    if multiplier is None:
+        return 0
+    reward = int(EVENT_BASE_PARTICIPATION * multiplier)
+    if resultat == "Victoire":
+        reward += EVENT_VICTORY_BONUS
+    return reward
+
+
 # --- Commande générique pour enregistrer une run ---
 async def handle_run(ctx: commands.Context, event_type: str):
     if ctx.channel.id not in ALLOWED_CHANNEL_IDS:
@@ -1082,10 +1064,8 @@ async def handle_run(ctx: commands.Context, event_type: str):
         # Récompense Flamtons pour event
         difficulty_key = intensite.lower().strip()
         multiplier = EVENT_DIFFICULTY_MULTIPLIERS.get(difficulty_key)
-        if multiplier is not None:
-            reward = int(EVENT_BASE_PARTICIPATION * multiplier)
-            if resultat == "Victoire":
-                reward += EVENT_VICTORY_BONUS
+        reward = compute_event_reward(intensite, resultat)
+        if reward > 0:
             for member in mentioned:
                 add_coins(member.id, reward)
             reward_text = f"\n\n{FLAMTON} **+{reward} Flamtons** par joueur"
@@ -1396,19 +1376,38 @@ async def supprun(ctx: commands.Context):
         return
 
     run_id = run[0]
+    run_intensite = run[1]
+    run_temps = run[2]
+    run_resultat = run[3]
     submitted_by = run[4]
 
     # Autoriser si admin OU auteur de la run
     is_admin = any(role.name == ADMIN_ROLE for role in ctx.author.roles) or ctx.author.guild_permissions.administrator
     if not is_admin and ctx.author.id != submitted_by:
+        conn.close()
         await ctx.reply("❌ Tu peux supprimer uniquement tes propres runs (ou être **PyroAdmin**).")
         return
+
+    # Récupérer les joueurs avant suppression (pour reprendre la récompense distribuée)
+    c.execute("SELECT discord_id FROM run_players WHERE run_id = ?", (run_id,))
+    player_ids = [r[0] for r in c.fetchall()]
     c.execute("DELETE FROM run_players WHERE run_id = ?", (run_id,))
     c.execute("DELETE FROM runs WHERE id = ?", (run_id,))
     conn.commit()
     conn.close()
 
-    await ctx.reply(f"🗑️ Run #{run_id} supprimée ({run[1]} — {run[2]} — {run[3]}).")
+    # Anti-duplication : reprendre les Flamtons versés pour cette run
+    reward = compute_event_reward(run_intensite, run_resultat)
+    reclaimed = 0
+    if reward > 0:
+        for pid in player_ids:
+            to_remove = min(reward, get_balance(pid))
+            if to_remove > 0:
+                add_coins(pid, -to_remove)
+                reclaimed += to_remove
+
+    reclaim_txt = f"\n💰 {reclaimed} {FLAMTON} repris aux joueurs." if reclaimed else ""
+    await ctx.reply(f"🗑️ Run #{run_id} supprimée ({run_intensite} — {run_temps} — {run_resultat}).{reclaim_txt}")
 
 
 @bot.command(name="event")
@@ -2737,6 +2736,92 @@ async def before_daily_compliment():
     await asyncio.sleep(wait_seconds)
 
 
+@bot.command(name="profil")
+async def profil(ctx: commands.Context, target: discord.Member = None):
+    """!profil [@joueur] — Profil complet : solde, stats runs, titre, bonus actifs."""
+    allowed = set(ALLOWED_CHANNEL_IDS)
+    for cid in (CASINO_CHANNEL_ID, SHOP_CHANNEL_ID):
+        if cid:
+            allowed.add(cid)
+    if ctx.channel.id not in allowed:
+        return
+    target = target or ctx.author
+
+    balance = get_balance(target.id)
+    daily = get_daily_earned(target.id)
+    now = datetime.now(TIMEZONE).isoformat()
+
+    conn = sqlite3.connect("save.db")
+    c = conn.cursor()
+    c.execute("""
+        SELECT COUNT(*), SUM(CASE WHEN r.resultat='Victoire' THEN 1 ELSE 0 END)
+        FROM runs r JOIN run_players rp ON r.id = rp.run_id
+        WHERE rp.discord_id = ?
+    """, (target.id,))
+    total, victoires = c.fetchone()
+    total = total or 0
+    victoires = victoires or 0
+    c.execute("""
+        SELECT r.intensite, r.temps_display, r.temps_seconds, r.event_type
+        FROM runs r JOIN run_players rp ON r.id = rp.run_id
+        WHERE rp.discord_id = ? AND r.resultat = 'Victoire'
+        ORDER BY r.intensite_rank DESC, r.temps_seconds ASC LIMIT 1
+    """, (target.id,))
+    best = c.fetchone()
+    c.execute("SELECT role_key FROM active_roles WHERE discord_id = ? AND expires_at > ?", (target.id, now))
+    roles_act = c.fetchall()
+    c.execute("SELECT item_type FROM active_items WHERE discord_id = ? AND expires_at > ?", (target.id, now))
+    items_act = c.fetchall()
+    conn.close()
+
+    streak = get_streak(target.id)
+    title_str = get_title(best[2] if best else 0, victoires, streak)
+
+    # Statut vocal
+    session = voice_sessions.get(target.id)
+    if not session:
+        vocal_status = "🔴 Hors vocal"
+    elif session.get("afk"):
+        vocal_status = "💤 AFK"
+    else:
+        ch = bot.get_channel(session["channel_id"])
+        mult = get_voice_multiplier(ch) if ch else 0
+        vocal_status = f"🟢 Actif x{mult}" if mult > 0 else "🟡 Seul (pas de gain)"
+
+    embed = discord.Embed(title=f"👤 Profil de {target.display_name}", color=discord.Color.dark_gold())
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="Titre", value=title_str, inline=False)
+    embed.add_field(name="💰 Flamtons", value=f"**{balance}** {FLAMTON}", inline=True)
+    embed.add_field(name="Gagné aujourd'hui", value=f"{daily}/{DAILY_CAP} {FLAMTON}", inline=True)
+    embed.add_field(name="🎙️ Vocal", value=vocal_status, inline=True)
+    winrate = f" ({victoires/total*100:.0f}%)" if total else ""
+    embed.add_field(name="🎮 Runs", value=f"{victoires}/{total} victoires{winrate}", inline=True)
+    if best:
+        embed.add_field(name="🏆 Meilleure run", value=f"{best[0]} — {best[1]} ({best[3]})", inline=True)
+    if streak > 0:
+        embed.add_field(name="🔥 Série", value=f"{streak} victoire(s)", inline=True)
+
+    # Bonus actifs
+    bonus_lines = []
+    for (role_key,) in roles_act:
+        bonus_lines.append(f"👑 {SHOP_ROLES.get(role_key, {}).get('role_name', role_key)}")
+    item_labels = {
+        "immunity": "🛡️ Immunité",
+        "rename": "✏️ Renommé",
+        "avatar_pin": "⭐ Avatar épinglé",
+        "banner_pin": "📢 Bannière",
+    }
+    for (item_type,) in items_act:
+        bonus_lines.append(item_labels.get(item_type, item_type))
+    discount = get_user_discount(target.id)
+    if discount > 0:
+        bonus_lines.append(f"🏷️ -{int(discount*100)}% boutique Tier 3")
+    if bonus_lines:
+        embed.add_field(name="✨ Bonus actifs", value="\n".join(bonus_lines), inline=False)
+
+    await ctx.reply(embed=embed)
+
+
 @bot.command(name="aide")
 async def aide(ctx: commands.Context):
     """!aide — Liste des commandes."""
@@ -2752,7 +2837,7 @@ async def aide(ctx: commands.Context):
     )
     embed.add_field(name="📸 Enregistrer une run", value="`!songe @joueurs` + screenshot\n`!bolgrot @joueurs` + screenshot", inline=False)
     embed.add_field(name="🏆 Classements", value="`!classement` — classement Songe\n`!classement bolgrot` — classement Bolgrot", inline=False)
-    embed.add_field(name="📊 Stats", value="`!stats @joueur` — stats d'un joueur\n`!historique @joueur` — historique des runs", inline=False)
+    embed.add_field(name="📊 Stats", value="`!profil [@joueur]` — profil complet (solde + stats + bonus)\n`!stats @joueur` — stats d'un joueur\n`!historique @joueur` — historique des runs", inline=False)
     embed.add_field(name="📅 Événements", value="`!event` — événements en cours\n`!inscrits` — liste des inscrits", inline=False)
     embed.add_field(name="🎰 Casino", value=(
         "`!solde` — voir ton solde\n"
@@ -2775,7 +2860,7 @@ async def aide(ctx: commands.Context):
         "🔥 **Roast auto** — tous les jours à 12h\n"
         "💖 **Compliment auto** — tous les jours à 18h"
     ), inline=False)
-    embed.add_field(name="🔧 Admin", value=f"`!raid @joueurs` — récompense les participants d'un raid (+{RAID_REWARD} {FLAMTON})\n`!coins add/remove @joueur <montant>` — créditer/retirer des {FLAMTON}\n**Répondre** au message d'une run + `!supprun` — supprimer cette run\n`!reset` — réinitialiser toutes les runs\n`!backup` — sauvegarder la base\n`!restore` — restaurer depuis un backup\n`!purge <id_debut> <id_fin>` — supprimer les messages entre deux IDs\n(rôle {ADMIN_ROLE} requis)", inline=False)
+    embed.add_field(name="🔧 Admin", value=f"`!raid @joueurs` — récompense les participants d'un raid (+{RAID_REWARD} {FLAMTON})\n`!coins add/remove @joueur <montant>` — créditer/retirer des {FLAMTON}\n`!coins stats` — statistiques économiques\n**Répondre** au message d'une run + `!supprun` — supprimer cette run\n`!reset` — réinitialiser toutes les runs\n`!backup` — sauvegarder la base\n`!restore` — restaurer depuis un backup\n`!purge <id_debut> <id_fin>` — supprimer les messages entre deux IDs\n(rôle {ADMIN_ROLE} requis)", inline=False)
 
     await ctx.reply(embed=embed)
 
@@ -2786,6 +2871,29 @@ async def coins_admin(ctx: commands.Context, action: str = "", *, args: str = ""
     is_admin = any(role.name == ADMIN_ROLE for role in ctx.author.roles) or ctx.author.guild_permissions.administrator
     if not is_admin:
         await ctx.reply(f"❌ Réservé aux **{ADMIN_ROLE}** / administrateurs.")
+        return
+    if action == "stats":
+        conn = sqlite3.connect("save.db")
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*), COALESCE(SUM(balance), 0), COALESCE(MAX(balance), 0), COALESCE(AVG(balance), 0) FROM wallets WHERE balance > 0")
+        nb, total, maxbal, avg = c.fetchone()
+        today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+        c.execute("SELECT COALESCE(SUM(earned), 0) FROM coin_daily WHERE date = ?", (today,))
+        earned_today = c.fetchone()[0]
+        c.execute("SELECT discord_id, balance FROM wallets ORDER BY balance DESC LIMIT 1")
+        top = c.fetchone()
+        conn.close()
+        embed = discord.Embed(title="📊 Statistiques économiques", color=discord.Color.gold())
+        embed.add_field(name="Masse monétaire totale", value=f"**{total}** {FLAMTON}", inline=False)
+        embed.add_field(name="Détenteurs (solde > 0)", value=f"{nb}", inline=True)
+        embed.add_field(name="Solde moyen", value=f"{int(avg)} {FLAMTON}", inline=True)
+        embed.add_field(name="Solde max", value=f"{maxbal} {FLAMTON}", inline=True)
+        embed.add_field(name="Généré aujourd'hui (vocal)", value=f"{earned_today} {FLAMTON}", inline=True)
+        if top and top[1] > 0:
+            member = ctx.guild.get_member(top[0]) if ctx.guild else None
+            tname = member.display_name if member else f"ID:{top[0]}"
+            embed.add_field(name="Plus riche", value=f"{tname} — {top[1]} {FLAMTON}", inline=True)
+        await ctx.reply(embed=embed)
         return
     mentioned = [m for m in ctx.message.mentions if not m.bot]
     parts = args.split()
@@ -2805,7 +2913,7 @@ async def coins_admin(ctx: commands.Context, action: str = "", *, args: str = ""
         await ctx.reply("\n".join(lines))
         return
     if action not in ("add", "remove") or not mentioned or montant <= 0:
-        await ctx.reply("❌ Usage :\n`!coins add @joueur(s) <montant>`\n`!coins remove @joueur(s) <montant>`\n`!coins reset @joueur(s)`")
+        await ctx.reply("❌ Usage :\n`!coins add @joueur(s) <montant>`\n`!coins remove @joueur(s) <montant>`\n`!coins reset @joueur(s)`\n`!coins stats`")
         return
     lines = []
     for target in mentioned:

@@ -8,6 +8,7 @@ import os
 import json
 import random
 import asyncio
+import hashlib
 from datetime import datetime, timedelta
 import pytz
 
@@ -218,7 +219,11 @@ def init_db():
         pass
     try:
         c.execute("ALTER TABLE runs ADD COLUMN message_id INTEGER")
-    except:
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("ALTER TABLE runs ADD COLUMN image_hash TEXT")
+    except sqlite3.OperationalError:
         pass
     conn.commit()
     conn.close()
@@ -764,6 +769,9 @@ async def on_ready():
     if not check_expired_roles.is_running():
         check_expired_roles.start()
         print("[ROLES] Vérification expiration toutes les heures.")
+    if not check_expired_items.is_running():
+        check_expired_items.start()
+        print("[ITEMS] Vérification effets temporaires toutes les 2 min.")
     if not daily_roast.is_running():
         daily_roast.start()
         print("[ROAST] Roast quotidien activé (12h).")
@@ -892,18 +900,63 @@ async def check_expired_roles():
             role = discord.utils.get(guild.roles, name=role_display)
             if role and role in member.roles:
                 try:
-                    await member.remove_role(role)
+                    await member.remove_roles(role)
                     print(f"[ROLES] Rôle {role_key} expiré retiré de {member.display_name}")
                 except Exception as e:
                     print(f"[ROLES] Erreur retrait rôle {role_key} de {member.display_name}: {e}")
-    # Nettoyage items expirés
-    c.execute("DELETE FROM active_items WHERE expires_at <= ?", (now,))
     conn.commit()
     conn.close()
 
 
 @check_expired_roles.before_loop
 async def before_check_expired_roles():
+    await bot.wait_until_ready()
+
+
+@tasks.loop(minutes=2)
+async def check_expired_items():
+    """Rétablit côté Discord les effets temporaires expirés (rename/avatar/banner) puis purge la DB.
+    Piloté par la DB → survit aux redémarrages du bot (contrairement à un asyncio.sleep)."""
+    now = datetime.now(TIMEZONE).isoformat()
+    conn = sqlite3.connect("save.db")
+    c = conn.cursor()
+    c.execute("SELECT id, discord_id, item_type, data FROM active_items WHERE expires_at <= ?", (now,))
+    expired = c.fetchall()
+    conn.close()
+
+    for item_id, discord_id, item_type, data in expired:
+        try:
+            if item_type == "rename":
+                for guild in bot.guilds:
+                    member = guild.get_member(discord_id)
+                    if member:
+                        try:
+                            await member.edit(nick=data or None)
+                        except Exception as e:
+                            print(f"[ITEMS] Erreur revert rename {discord_id}: {e}")
+                        break
+            elif item_type in ("avatar_pin", "banner_pin"):
+                if data and ":" in data:
+                    ch_id, msg_id = data.split(":", 1)
+                    channel = bot.get_channel(int(ch_id))
+                    if channel:
+                        try:
+                            pinned = await channel.fetch_message(int(msg_id))
+                            await pinned.unpin()
+                        except Exception as e:
+                            print(f"[ITEMS] Erreur unpin {item_type} {msg_id}: {e}")
+        except Exception as e:
+            print(f"[ITEMS] Erreur expiration item {item_id} ({item_type}): {e}")
+        # Purge la ligne une fois traitée
+        conn2 = sqlite3.connect("save.db")
+        c2 = conn2.cursor()
+        c2.execute("DELETE FROM active_items WHERE id = ?", (item_id,))
+        conn2.commit()
+        conn2.close()
+
+
+@check_expired_items.before_loop
+async def before_check_expired_items():
     await bot.wait_until_ready()
 
 
@@ -937,7 +990,22 @@ async def handle_run(ctx: commands.Context, event_type: str):
     try:
         image_bytes = await attachment.read()
         media_type = attachment.content_type
-        data = analyze_screenshot(image_bytes, media_type, event_type)
+
+        # Anti-triche : refuser une capture déjà enregistrée (évite le farm par re-soumission)
+        image_hash = hashlib.sha256(image_bytes).hexdigest()
+        conn = sqlite3.connect("save.db")
+        c = conn.cursor()
+        c.execute("SELECT id FROM runs WHERE image_hash = ?", (image_hash,))
+        dup = c.fetchone()
+        conn.close()
+        if dup:
+            await msg.edit(
+                content=f"❌ **Run refusée** — Cette capture a déjà été enregistrée (run #{dup[0]}).\n"
+                        "Une même capture ne peut pas être soumise deux fois."
+            )
+            return
+
+        data = await asyncio.to_thread(analyze_screenshot, image_bytes, media_type, event_type)
 
         intensite = data.get("intensite", "Inconnu")
         temps_display = data.get("temps", "00:00")
@@ -971,11 +1039,11 @@ async def handle_run(ctx: commands.Context, event_type: str):
         c = conn.cursor()
         c.execute("""
             INSERT INTO runs (event_type, timestamp, intensite, intensite_rank, temps_seconds, temps_display,
-                            resultat, palier, score, tours, songeur, date_ingame, submitted_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            resultat, palier, score, tours, songeur, date_ingame, submitted_by, image_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             event_type, datetime.now(TIMEZONE).isoformat(), intensite, intensite_rank, temps_seconds,
-            temps_display, resultat, palier, score, tours, songeur, date_ingame, ctx.author.id
+            temps_display, resultat, palier, score, tours, songeur, date_ingame, ctx.author.id, image_hash
         ))
         run_id = c.lastrowid
 
@@ -1949,7 +2017,8 @@ async def buy(ctx: commands.Context, *, args: str = ""):
             return
         add_coins(ctx.author.id, -price)
         try:
-            result = generate_text_gemini(
+            result = await asyncio.to_thread(
+                generate_text_gemini,
                 "Génère une devinette courte sur l'univers Dofus (monstres, donjons, classes, sorts, zones, PNJ). "
                 "La réponse doit être UN SEUL MOT ou un nom propre simple (ex: Iop, Abraknyde, Bonta, Nidas, Tofu, Pandala). "
                 "Pas de phrase longue en réponse. "
@@ -2014,7 +2083,8 @@ async def buy(ctx: commands.Context, *, args: str = ""):
 
         # Anti-vulgarité automatique
         try:
-            check = generate_text_gemini(
+            check = await asyncio.to_thread(
+                generate_text_gemini,
                 f"Le surnom suivant est-il vulgaire, offensant, discriminatoire ou inapproprié ? "
                 f"Surnom : \"{surnom}\". Réponds uniquement par OUI ou NON."
             )
@@ -2042,12 +2112,7 @@ async def buy(ctx: commands.Context, *, args: str = ""):
             embed.set_footer(text=f"Rename acheté par {ctx.author.display_name}")
             await (fun_ch or ctx.channel).send(f"@everyone", embed=embed)
             await ctx.reply(f"✏️ Rename virtuel posté !\n💰 -{price} {FLAMTON} | Solde : {get_balance(ctx.author.id)} {FLAMTON}")
-        if renamed:
-            await asyncio.sleep(3600)
-            try:
-                await target.edit(nick=old_nick)
-            except Exception:
-                pass
+        # Le pseudo d'origine est rétabli par la boucle check_expired_items (survit aux redémarrages)
         return
 
     # --- AVATAR (Joueur du jour) ---
@@ -2068,11 +2133,8 @@ async def buy(ctx: commands.Context, *, args: str = ""):
         pin_msg = await ctx.reply(embed=embed)
         try:
             await pin_msg.pin()
-        except Exception:
-            pass
-        await asyncio.sleep(86400)
-        try:
-            await pin_msg.unpin()
+            # Désépinglage géré par check_expired_items (survit aux redémarrages)
+            add_active_item(ctx.author.id, "avatar_pin", f"{pin_msg.channel.id}:{pin_msg.id}", 24)
         except Exception:
             pass
         return
@@ -2113,11 +2175,8 @@ async def buy(ctx: commands.Context, *, args: str = ""):
         banner_msg = await ctx.reply(embed=embed)
         try:
             await banner_msg.pin()
-        except Exception:
-            pass
-        await asyncio.sleep(7 * 86400)
-        try:
-            await banner_msg.unpin()
+            # Désépinglage géré par check_expired_items (survit aux redémarrages)
+            add_active_item(ctx.author.id, "banner_pin", f"{banner_msg.channel.id}:{banner_msg.id}", 7 * 24)
         except Exception:
             pass
         return
@@ -2576,7 +2635,8 @@ async def roast_cmd(ctx: commands.Context, target: discord.Member = None):
             return
         target = random.choice(members)
     try:
-        text = generate_text_gemini(
+        text = await asyncio.to_thread(
+            generate_text_gemini,
             f"Tu es un bot Discord humoristique dans une guilde gaming. Génère une vanne drôle et bon enfant "
             f"(pas méchant, pas vulgaire, pas discriminatoire) sur le joueur \"{target.display_name}\". "
             f"Tu peux parler de gaming, de ses habitudes imaginaires, de stéréotypes de joueurs, d'humour absurde, "
@@ -2605,7 +2665,8 @@ async def daily_roast():
             continue
         target = random.choice(members)
         try:
-            text = generate_text_gemini(
+            text = await asyncio.to_thread(
+                generate_text_gemini,
                 f"Tu es un bot Discord humoristique dans une guilde gaming. Génère une vanne drôle et bon enfant "
                 f"(pas méchant, pas vulgaire, pas discriminatoire) sur le joueur \"{target.display_name}\". "
                 f"Tu peux parler de gaming, de ses habitudes imaginaires, de stéréotypes de joueurs, d'humour absurde, "
@@ -2645,7 +2706,8 @@ async def daily_compliment():
             continue
         target = random.choice(members)
         try:
-            text = generate_text_gemini(
+            text = await asyncio.to_thread(
+                generate_text_gemini,
                 f"Tu es un bot Discord bienveillant dans une guilde gaming. Génère un compliment sympa et original "
                 f"sur le joueur \"{target.display_name}\". Tu peux parler de gaming, d'entraide, de skill, "
                 f"de sa personnalité imaginaire, de sa valeur dans l'équipe, d'humour positif. "

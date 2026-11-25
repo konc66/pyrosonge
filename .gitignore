@@ -1,5 +1,8 @@
 .env
 songe.db
+save.db
+save*.db
+*.db
 pyrosonge.log
 __pycache__/
 *.pyc

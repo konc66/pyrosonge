@@ -857,6 +857,12 @@ async def vocal_coin_tick():
             to_remove.append(user_id)
             continue
 
+        # Seuls les membres de la guilde gagnent des Flamtons (même en vocal avec des non-membres)
+        if GUILD_MEMBER_ROLE_ID:
+            member = channel.guild.get_member(user_id) if channel.guild else None
+            if not member or not any(r.id == GUILD_MEMBER_ROLE_ID for r in member.roles):
+                continue
+
         multiplier = get_voice_multiplier(channel)
         if multiplier <= 0:
             continue

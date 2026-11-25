@@ -355,6 +355,10 @@ def get_previous_best_time(discord_id: int, event_type: str) -> int | None:
     return result[0] if result and result[0] is not None else None
 
 # --- Wallet helpers ---
+# Drapeau : passe à True dès qu'un solde change → la boucle backup_flush sauvegarde dans les 60 s
+_backup_dirty = False
+
+
 def get_balance(discord_id: int) -> int:
     conn = sqlite3.connect("save.db")
     c = conn.cursor()
@@ -365,6 +369,7 @@ def get_balance(discord_id: int) -> int:
 
 
 def add_coins(discord_id: int, amount: int) -> int:
+    global _backup_dirty
     conn = sqlite3.connect("save.db")
     c = conn.cursor()
     c.execute("INSERT INTO wallets (discord_id, balance) VALUES (?, ?) ON CONFLICT(discord_id) DO UPDATE SET balance = balance + ?",
@@ -373,6 +378,7 @@ def add_coins(discord_id: int, amount: int) -> int:
     new_balance = c.fetchone()[0]
     conn.commit()
     conn.close()
+    _backup_dirty = True
     return new_balance
 
 
@@ -577,20 +583,37 @@ async def auto_backup(source_channel):
         print(f"[AUTO-BACKUP] Erreur: {e}")
 
 
-@tasks.loop(minutes=30)
+@tasks.loop(minutes=5)
 async def periodic_backup():
-    """Backup automatique toutes les 30 min."""
+    """Backup de sécurité toutes les 5 min (couvre runs, tickets, items même sans activité éco)."""
     target = bot.get_channel(BACKUP_CHANNEL_ID) if BACKUP_CHANNEL_ID else None
     if not target:
         print("[PERIODIC-BACKUP] BACKUP_CHANNEL_ID non configuré, skip.")
         return
-    print("[PERIODIC-BACKUP] Lancement du backup périodique...")
     await auto_backup(target)
-    print("[PERIODIC-BACKUP] Backup périodique terminé.")
 
 
 @periodic_backup.before_loop
 async def before_periodic_backup():
+    await bot.wait_until_ready()
+
+
+@tasks.loop(seconds=60)
+async def backup_flush():
+    """Sauvegarde dans les 60 s dès qu'un solde a changé (casino, boutique, don, vocal...).
+    1 upload/minute maximum → pas de spam de l'API Discord."""
+    global _backup_dirty
+    if not _backup_dirty:
+        return
+    target = bot.get_channel(BACKUP_CHANNEL_ID) if BACKUP_CHANNEL_ID else None
+    if not target:
+        return
+    _backup_dirty = False  # reset avant l'upload : une modif pendant le backup sera reprise au tick suivant
+    await auto_backup(target)
+
+
+@backup_flush.before_loop
+async def before_backup_flush():
     await bot.wait_until_ready()
 
 
@@ -713,7 +736,10 @@ async def on_ready():
     await first_boot_intro()
     if not periodic_backup.is_running():
         periodic_backup.start()
-        print("[PERIODIC-BACKUP] Tâche planifiée toutes les 30 min.")
+        print("[PERIODIC-BACKUP] Backup de sécurité toutes les 5 min.")
+    if not backup_flush.is_running():
+        backup_flush.start()
+        print("[BACKUP-FLUSH] Sauvegarde sous 60 s après chaque mouvement de coins.")
     now = datetime.now(TIMEZONE).timestamp()
     for guild in bot.guilds:
         afk_channel_id = guild.afk_channel.id if guild.afk_channel else None
@@ -756,6 +782,31 @@ async def on_ready():
         print(f"{len(synced)} commandes slash synchronisées")
     except Exception as e:
         print(f"Erreur sync: {e}")
+
+
+@bot.event
+async def on_command_error(ctx, error):
+    """Gestion propre des erreurs de commandes (retour utilisateur + pas de spam console)."""
+    error = getattr(error, "original", error)
+    if isinstance(error, commands.CommandNotFound):
+        return
+    if isinstance(error, commands.CommandOnCooldown):
+        await ctx.reply(f"⏳ Doucement ! Réessaie dans {error.retry_after:.1f}s.", delete_after=5)
+        return
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.reply("❌ Il manque un argument. Tape `!aide` pour la syntaxe.", delete_after=8)
+        return
+    if isinstance(error, (commands.BadArgument, commands.BadUnionArgument, commands.MemberNotFound)):
+        await ctx.reply("❌ Argument invalide (ex : la mise doit être un nombre, mentionne un joueur valide). Tape `!aide`.", delete_after=8)
+        return
+    if isinstance(error, commands.CheckFailure):
+        return
+    # Erreur inattendue : log console + message générique
+    print(f"[CMD-ERROR] {ctx.command} : {type(error).__name__}: {error}")
+    try:
+        await ctx.reply("❌ Une erreur est survenue. Les admins ont été prévenus dans les logs.", delete_after=8)
+    except Exception:
+        pass
 
 
 # --- Vocal coin tracking ---
@@ -1108,12 +1159,14 @@ async def handle_run(ctx: commands.Context, event_type: str):
 
 
 @bot.command(name="songe")
+@commands.cooldown(1, 10, commands.BucketType.user)
 async def songe(ctx: commands.Context):
     """!songe @joueur1 @joueur2 ... + screenshot"""
     await handle_run(ctx, "songe")
 
 
 @bot.command(name="bolgrot")
+@commands.cooldown(1, 10, commands.BucketType.user)
 async def bolgrot(ctx: commands.Context):
     """!bolgrot @joueur1 @joueur2 ... + screenshot"""
     await handle_run(ctx, "bolgrot")
@@ -1565,6 +1618,7 @@ async def classement_coins(ctx: commands.Context):
 
 
 @bot.command(name="slots")
+@commands.cooldown(1, 3, commands.BucketType.user)
 async def slots(ctx: commands.Context, mise: int = 0):
     """!slots <mise> — Machine à sous."""
     if CASINO_CHANNEL_ID and ctx.channel.id != CASINO_CHANNEL_ID:
@@ -1631,6 +1685,7 @@ async def slots(ctx: commands.Context, mise: int = 0):
 
 
 @bot.command(name="coinflip")
+@commands.cooldown(1, 5, commands.BucketType.user)
 async def coinflip(ctx: commands.Context, target: discord.Member = None, mise: int = 0):
     """!coinflip @joueur <mise> — Pile ou face PvP."""
     if CASINO_CHANNEL_ID and ctx.channel.id != CASINO_CHANNEL_ID:
@@ -1761,6 +1816,7 @@ def _roulette_table(highlight=None):
 
 
 @bot.command(name="roulette")
+@commands.cooldown(1, 3, commands.BucketType.user)
 async def roulette(ctx: commands.Context, mise: int = 0, *, choix: str = ""):
     """!roulette <mise> <choix> — Roulette de casino. Multi-mise possible."""
     if CASINO_CHANNEL_ID and ctx.channel.id != CASINO_CHANNEL_ID:
@@ -1921,6 +1977,7 @@ async def shop(ctx: commands.Context):
 
 
 @bot.command(name="buy")
+@commands.cooldown(1, 3, commands.BucketType.user)
 async def buy(ctx: commands.Context, *, args: str = ""):
     """!buy <item> [params] — Acheter un article."""
     if SHOP_CHANNEL_ID and ctx.channel.id != SHOP_CHANNEL_ID:
@@ -2271,6 +2328,7 @@ async def buy(ctx: commands.Context, *, args: str = ""):
 
 # --- Don & Entraide ---
 @bot.command(name="don")
+@commands.cooldown(1, 3, commands.BucketType.user)
 async def don(ctx: commands.Context, target: discord.Member = None, montant: int = 0):
     """!don @joueur <montant> — Donner des Flamtons."""
     if SHOP_CHANNEL_ID and ctx.channel.id != SHOP_CHANNEL_ID:
@@ -2319,6 +2377,21 @@ async def entraide(ctx: commands.Context, *, description: str = ""):
     if not description:
         await ctx.reply("❌ Usage : `!entraide <ta demande>`\nEx: `!entraide Besoin d'aide pour le donjon Nidas, je suis lvl 180 enu`")
         return
+
+    # Anti-flood : 1 seul ticket d'entraide ouvert par personne
+    conn = sqlite3.connect("save.db")
+    c = conn.cursor()
+    c.execute("SELECT value FROM bot_meta WHERE key LIKE 'entraide_ticket_%'")
+    open_tickets = c.fetchall()
+    conn.close()
+    for (value,) in open_tickets:
+        try:
+            tid, cid = value.split("|")
+            if int(cid) == ctx.author.id and ctx.guild.get_channel(int(tid)):
+                await ctx.reply("❌ Tu as déjà un ticket d'entraide ouvert. Ferme-le avec `!fermer` avant d'en créer un nouveau.", delete_after=8)
+                return
+        except (ValueError, AttributeError):
+            continue
 
     # Permissions : créateur + admins + bot seulement (pas la guilde entière)
     overwrites = {

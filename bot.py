@@ -837,7 +837,7 @@ async def on_command_error(ctx, error):
 
 @bot.event
 async def on_message(message: discord.Message):
-    """Récompense les messages texte avec des Flamtons (option B : 1/msg, gap 90s)."""
+    """Récompense les messages texte avec des Flamtons (2/msg, gap 180s, cap 200/j)."""
     # Toujours traiter les commandes
     await bot.process_commands(message)
 
@@ -2997,11 +2997,13 @@ async def profil(ctx: commands.Context, target: discord.Member = None):
         mult = get_voice_multiplier(ch) if ch else 0
         vocal_status = f"🟢 Actif x{mult}" if mult > 0 else "🟡 Seul (pas de gain)"
 
+    text_daily = _get_text_daily(target.id)
     embed = discord.Embed(title=f"👤 Profil de {target.display_name}", color=discord.Color.dark_gold())
     embed.set_thumbnail(url=target.display_avatar.url)
     embed.add_field(name="Titre", value=title_str, inline=False)
     embed.add_field(name="💰 Flamtons", value=f"**{balance}** {FLAMTON}", inline=True)
     embed.add_field(name="Gagné aujourd'hui", value=f"{daily}/{DAILY_CAP} {FLAMTON}", inline=True)
+    embed.add_field(name="Dont écrit", value=f"✍️ {text_daily}/{TEXT_DAILY_CAP} {FLAMTON}", inline=True)
     embed.add_field(name="🎙️ Vocal", value=vocal_status, inline=True)
     winrate = f" ({victoires/total*100:.0f}%)" if total else ""
     embed.add_field(name="🎮 Runs", value=f"{victoires}/{total} victoires{winrate}", inline=True)
@@ -3048,6 +3050,11 @@ async def aide(ctx: commands.Context):
     embed.add_field(name="🏆 Classements", value="`!classement` — classement Songe\n`!classement bolgrot` — classement Bolgrot", inline=False)
     embed.add_field(name="📊 Stats", value="`!profil [@joueur]` — profil complet (solde + stats + bonus)\n`!stats @joueur` — stats d'un joueur\n`!historique @joueur` — historique des runs", inline=False)
     embed.add_field(name="📅 Événements", value="`!event` — événements en cours\n`!inscrits` — liste des inscrits", inline=False)
+    embed.add_field(name="💰 Flamtons", value=(
+        f"🎙️ **Vocal** — 1 {FLAMTON}/2 min (x1.5 à 3-4, x2 à 5+)\n"
+        f"✍️ **Écrit** — 2 {FLAMTON}/msg (1 msg/3 min, cap {TEXT_DAILY_CAP}/jour)\n"
+        f"🧢 Plafond global : {DAILY_CAP}/jour"
+    ), inline=False)
     embed.add_field(name="🎰 Casino", value=(
         "`!solde` — voir ton solde\n"
         "`!classement-coins` — top 15 des fortunes\n"
@@ -3062,14 +3069,25 @@ async def aide(ctx: commands.Context):
     ), inline=False)
     embed.add_field(name="🤝 Entraide", value=(
         "`!entraide <demande>` — crée un ticket privé\n"
-        "✅ Réagis sur une annonce d'entraide pour aider\n"
+        "✅ Réagis sur une annonce ou `!prendre` pour aider\n"
         "`!fermer` — ferme un ticket (créateur, helper ou admin)"
     ), inline=False)
     embed.add_field(name="🎉 Fun", value=(
         "🔥 **Roast auto** — tous les jours à 12h\n"
         "💖 **Compliment auto** — tous les jours à 18h"
     ), inline=False)
-    embed.add_field(name="🔧 Admin", value=f"`!raid @joueurs` — récompense les participants d'un raid (+{RAID_REWARD} {FLAMTON})\n`!coins add/remove @joueur <montant>` — créditer/retirer des {FLAMTON}\n`!coins stats` — statistiques économiques\n**Répondre** au message d'une run + `!supprun` — supprimer cette run\n`!reset` — réinitialiser toutes les runs\n`!backup` — sauvegarder la base\n`!restore` — restaurer depuis un backup\n`!purge <id_debut> <id_fin>` — supprimer les messages entre deux IDs\n(rôle {ADMIN_ROLE} requis)", inline=False)
+    embed.add_field(name="🔧 Admin", value=(
+        f"`!raid @joueurs` — récompense raid (+{RAID_REWARD} {FLAMTON})\n"
+        f"`!coins add/remove @joueur <montant>` — créditer/retirer\n"
+        f"`!coins reset @joueur(s)` — remettre à 0\n"
+        f"`!coins resetall` — reset tout le monde\n"
+        f"`!coins stats` — statistiques économiques\n"
+        f"`!supprun` (en réponse) — supprimer une run\n"
+        f"`!reset` — réinitialiser toutes les runs\n"
+        f"`!backup` / `!restore` — sauvegarder/restaurer\n"
+        f"`!purge <id_debut> <id_fin>` — supprimer des messages\n"
+        f"(rôle {ADMIN_ROLE} requis)"
+    ), inline=False)
 
     await ctx.reply(embed=embed)
 
@@ -3097,7 +3115,7 @@ async def coins_admin(ctx: commands.Context, action: str = "", *, args: str = ""
         embed.add_field(name="Détenteurs (solde > 0)", value=f"{nb}", inline=True)
         embed.add_field(name="Solde moyen", value=f"{int(avg)} {FLAMTON}", inline=True)
         embed.add_field(name="Solde max", value=f"{maxbal} {FLAMTON}", inline=True)
-        embed.add_field(name="Généré aujourd'hui (vocal)", value=f"{earned_today} {FLAMTON}", inline=True)
+        embed.add_field(name="Généré aujourd'hui", value=f"{earned_today} {FLAMTON}", inline=True)
         if top and top[1] > 0:
             member = ctx.guild.get_member(top[0]) if ctx.guild else None
             tname = member.display_name if member else f"ID:{top[0]}"
@@ -3147,6 +3165,7 @@ async def coins_admin(ctx: commands.Context, action: str = "", *, args: str = ""
         c.execute("DELETE FROM coin_text_daily")
         conn.commit()
         conn.close()
+        text_coin_sessions.clear()
         await ctx.reply(f"🔄 **Reset global effectué.**\n{nb} joueurs remis à 0 — {total} {FLAMTON} effacés.")
         return
     if action not in ("add", "remove") or not mentioned or montant <= 0:

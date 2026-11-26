@@ -40,6 +40,13 @@ GUILD_MEMBER_ROLE_ID = int(os.environ.get("GUILD_MEMBER_ROLE_ID", "0")) or None
 FUN_CHANNEL_ID = int(os.environ.get("FUN_CHANNEL_ID", "0")) or None
 ENTRAIDE_CHANNEL_ID = int(os.environ.get("ENTRAIDE_CHANNEL_ID", "0")) or None
 ENTRAIDE_CATEGORY_ID = int(os.environ.get("ENTRAIDE_CATEGORY_ID", "0")) or None
+
+# Salons/catégories où l'écrit rapporte des Flamtons
+_text_channels_raw = os.environ.get("TEXT_COIN_CHANNEL_IDS", "")
+TEXT_COIN_CHANNEL_IDS = [int(c.strip()) for c in _text_channels_raw.split(",") if c.strip()]
+_text_categories_raw = os.environ.get("TEXT_COIN_CATEGORY_IDS", "")
+TEXT_COIN_CATEGORY_IDS = [int(c.strip()) for c in _text_categories_raw.split(",") if c.strip()]
+
 FLAMTON = os.environ.get("FLAMTON_EMOJI", "🪙")
 TIMEZONE = pytz.timezone("Europe/Paris")
 
@@ -53,6 +60,12 @@ SLOTS_MAX_BET = 500
 ROULETTE_MIN_BET = 10
 ROULETTE_MAX_BET = 500
 COINFLIP_MAX_BET = 500
+
+# --- Text coins config ---
+TEXT_COIN_PAYOUT = 2          # Flamtons par message éligible
+TEXT_COIN_GAP = 180           # Secondes minimum entre 2 gains par message
+TEXT_DAILY_CAP = 200          # Sous-plafond écrit (dans le DAILY_CAP global)
+TEXT_MIN_LENGTH = 4           # Longueur minimum du message (hors espaces)
 
 # --- Don config ---
 DON_MIN = 50
@@ -162,6 +175,14 @@ def init_db():
     """)
     c.execute("""
         CREATE TABLE IF NOT EXISTS coin_daily (
+            discord_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            earned INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (discord_id, date)
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS coin_text_daily (
             discord_id INTEGER NOT NULL,
             date TEXT NOT NULL,
             earned INTEGER NOT NULL DEFAULT 0,
@@ -498,6 +519,9 @@ def generate_text_gemini(prompt: str) -> str:
 # {user_id: {"channel_id": int, "joined_at": float, "last_active": float, "mute_since": float|None}}
 voice_sessions = {}
 
+# {user_id: {"last_rewarded": float (timestamp), "last_content": str}}
+text_coin_sessions = {}
+
 
 def get_voice_multiplier(channel) -> float:
     if not channel:
@@ -807,6 +831,110 @@ async def on_command_error(ctx, error):
         await ctx.reply("❌ Une erreur est survenue. Les admins ont été prévenus dans les logs.", delete_after=8)
     except Exception:
         pass
+
+
+# --- Text coin tracking ---
+
+@bot.event
+async def on_message(message: discord.Message):
+    """Récompense les messages texte avec des Flamtons (option B : 1/msg, gap 90s)."""
+    # Toujours traiter les commandes
+    await bot.process_commands(message)
+
+    # Filtres de base
+    if message.author.bot:
+        return
+    if not message.guild:
+        return
+    # Salons éligibles au gain écrit : par salon, par catégorie, ou ALLOWED_CHANNEL_IDS par défaut
+    in_eligible_channel = message.channel.id in TEXT_COIN_CHANNEL_IDS if TEXT_COIN_CHANNEL_IDS else False
+    in_eligible_category = (
+        hasattr(message.channel, "category_id")
+        and message.channel.category_id
+        and message.channel.category_id in TEXT_COIN_CATEGORY_IDS
+    ) if TEXT_COIN_CATEGORY_IDS else False
+    # Fallback sur ALLOWED_CHANNEL_IDS si aucune config text spécifique
+    if not TEXT_COIN_CHANNEL_IDS and not TEXT_COIN_CATEGORY_IDS:
+        in_eligible_channel = message.channel.id in ALLOWED_CHANNEL_IDS
+    if not in_eligible_channel and not in_eligible_category:
+        return
+
+    # Ignorer les commandes bot
+    if message.content.startswith("!"):
+        return
+
+    # Vérifier rôle membre de guilde (même logique que le vocal)
+    if GUILD_MEMBER_ROLE_ID:
+        member = message.guild.get_member(message.author.id)
+        if not member or not any(r.id == GUILD_MEMBER_ROLE_ID for r in member.roles):
+            return
+
+    # Longueur minimum (hors espaces)
+    clean = message.content.strip()
+    if len(clean) < TEXT_MIN_LENGTH:
+        return
+
+    # Ignorer les messages qui ne sont que des emojis, liens ou mentions
+    text_only = re.sub(r'<a?:\w+:\d+>|https?://\S+|<@!?\d+>|<#\d+>|<@&\d+>', '', clean).strip()
+    if len(text_only) < TEXT_MIN_LENGTH:
+        return
+
+    now = datetime.now(TIMEZONE).timestamp()
+    user_id = message.author.id
+    session = text_coin_sessions.get(user_id)
+
+    # Anti-copier-coller : ignorer si identique au dernier message récompensé
+    if session and session.get("last_content") == clean:
+        return
+
+    # Gap de 90 secondes entre deux gains
+    if session and (now - session["last_rewarded"]) < TEXT_COIN_GAP:
+        return
+
+    # Vérifier le cap journalier global
+    daily = get_daily_earned(user_id)
+    if daily >= DAILY_CAP:
+        return
+
+    # Vérifier le sous-plafond écrit
+    text_today = _get_text_daily(user_id)
+    if text_today >= TEXT_DAILY_CAP:
+        return
+
+    # Créditer
+    coins = min(TEXT_COIN_PAYOUT, DAILY_CAP - daily, TEXT_DAILY_CAP - text_today)
+    if coins > 0:
+        add_coins(user_id, coins)
+        add_daily_earned(user_id, coins)
+        _add_text_daily(user_id, coins)
+        text_coin_sessions[user_id] = {
+            "last_rewarded": now,
+            "last_content": clean,
+        }
+
+
+def _get_text_daily(discord_id: int) -> int:
+    """Sous-plafond écrit du jour."""
+    today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+    conn = sqlite3.connect("save.db")
+    c = conn.cursor()
+    c.execute("SELECT earned FROM coin_text_daily WHERE discord_id = ? AND date = ?", (discord_id, today))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+
+def _add_text_daily(discord_id: int, amount: int):
+    today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+    conn = sqlite3.connect("save.db")
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO coin_text_daily (discord_id, date, earned) VALUES (?, ?, ?) "
+        "ON CONFLICT(discord_id, date) DO UPDATE SET earned = earned + ?",
+        (discord_id, today, amount, amount)
+    )
+    conn.commit()
+    conn.close()
 
 
 # --- Vocal coin tracking ---
@@ -1587,10 +1715,12 @@ async def solde(ctx: commands.Context):
             status = "🟡 En vocal (seul — pas de gain)"
         else:
             status = f"🟢 En vocal (actif x{mult})"
+    text_daily = _get_text_daily(ctx.author.id)
     embed = discord.Embed(title=f"💰 Solde de {ctx.author.display_name}", color=discord.Color.gold())
     embed.add_field(name="Flamtons", value=f"**{balance}** {FLAMTON}", inline=True)
     embed.add_field(name="Gagné aujourd'hui", value=f"{daily}/{DAILY_CAP} {FLAMTON}", inline=True)
     embed.add_field(name="Statut vocal", value=status, inline=True)
+    embed.add_field(name="Dont écrit", value=f"✍️ {text_daily}/{TEXT_DAILY_CAP} {FLAMTON}", inline=True)
     await ctx.reply(embed=embed)
 
 
@@ -2985,8 +3115,36 @@ async def coins_admin(ctx: commands.Context, action: str = "", *, args: str = ""
             lines.append(f"🔄 {target.mention} remis à **0** {FLAMTON} (ancien solde : {bal})")
         await ctx.reply("\n".join(lines))
         return
+    if action == "resetall":
+        # Confirmation par réaction pour éviter les accidents
+        confirm_msg = await ctx.reply(f"⚠️ **Tu es sur le point de remettre TOUS les soldes à 0.**\nReagis ✅ dans les 15s pour confirmer.")
+        await confirm_msg.add_reaction("✅")
+
+        def check_react(reaction, user):
+            return (
+                user == ctx.author
+                and str(reaction.emoji) == "✅"
+                and reaction.message.id == confirm_msg.id
+            )
+        try:
+            await bot.wait_for("reaction_add", timeout=15.0, check=check_react)
+        except asyncio.TimeoutError:
+            await confirm_msg.edit(content="⏳ Annulé — pas de confirmation.")
+            return
+
+        conn = sqlite3.connect("save.db")
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*), COALESCE(SUM(balance), 0) FROM wallets WHERE balance > 0")
+        nb, total = c.fetchone()
+        c.execute("UPDATE wallets SET balance = 0")
+        c.execute("DELETE FROM coin_daily")
+        c.execute("DELETE FROM coin_text_daily")
+        conn.commit()
+        conn.close()
+        await ctx.reply(f"🔄 **Reset global effectué.**\n{nb} joueurs remis à 0 — {total} {FLAMTON} effacés.")
+        return
     if action not in ("add", "remove") or not mentioned or montant <= 0:
-        await ctx.reply("❌ Usage :\n`!coins add @joueur(s) <montant>`\n`!coins remove @joueur(s) <montant>`\n`!coins reset @joueur(s)`\n`!coins stats`")
+        await ctx.reply("❌ Usage :\n`!coins add @joueur(s) <montant>`\n`!coins remove @joueur(s) <montant>`\n`!coins reset @joueur(s)`\n`!coins resetall` — reset tout le monde\n`!coins stats`")
         return
     lines = []
     for target in mentioned:

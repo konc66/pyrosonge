@@ -2845,11 +2845,13 @@ async def roast_cmd(ctx: commands.Context, target: discord.Member = None):
     try:
         text = await asyncio.to_thread(
             generate_text_gemini,
-            f"Tu es un bot Discord humoristique dans une guilde gaming. Génère une vanne drôle et bon enfant "
-            f"(pas méchant, pas vulgaire, pas discriminatoire) sur le joueur \"{target.display_name}\". "
-            f"Tu peux parler de gaming, de ses habitudes imaginaires, de stéréotypes de joueurs, d'humour absurde, "
-            f"de MMO, de rage quit, de tryhard, de tout ce qui est drôle dans la culture gaming et internet. "
-            f"Maximum 2 phrases. En français. Sois créatif et varié."
+            f"Tu es un bot Discord avec un humour trash, sarcastique et sans filtre. Génère une vanne bien piquante "
+            f"sur \"{target.display_name}\". Sois cinglant, moqueur, provocateur — le genre de vanne qu'on balance "
+            f"entre potes sans pitié. Tu peux taper sur : son pseudo, son physique imaginaire, sa vie sentimentale, "
+            f"ses habitudes douteuses, sa personnalité, son hygiène, ses choix de vie, l'absurde, la culture internet, "
+            f"les clichés sociaux, tout ce qui fait rire dans un groupe de potes. "
+            f"INTERDIT : la famille (parents, frères/sœurs, enfants), le racisme, l'homophobie, le handicap, la religion. "
+            f"Maximum 2-3 phrases. En français. Sois créatif, varié et sans pitié."
         )
         embed = discord.Embed(title=f"🔥 Roast — {target.display_name}", description=text, color=discord.Color.orange())
         await ctx.reply(target.mention, embed=embed)
@@ -2875,11 +2877,13 @@ async def daily_roast():
         try:
             text = await asyncio.to_thread(
                 generate_text_gemini,
-                f"Tu es un bot Discord humoristique dans une guilde gaming. Génère une vanne drôle et bon enfant "
-                f"(pas méchant, pas vulgaire, pas discriminatoire) sur le joueur \"{target.display_name}\". "
-                f"Tu peux parler de gaming, de ses habitudes imaginaires, de stéréotypes de joueurs, d'humour absurde, "
-                f"de MMO, de rage quit, de tryhard, de tout ce qui est drôle dans la culture gaming et internet. "
-                f"Maximum 2 phrases. En français. Sois créatif et varié."
+                f"Tu es un bot Discord avec un humour trash, sarcastique et sans filtre. Génère une vanne bien piquante "
+                f"sur \"{target.display_name}\". Sois cinglant, moqueur, provocateur — le genre de vanne qu'on balance "
+                f"entre potes sans pitié. Tu peux taper sur : son pseudo, son physique imaginaire, sa vie sentimentale, "
+                f"ses habitudes douteuses, sa personnalité, son hygiène, ses choix de vie, l'absurde, la culture internet, "
+                f"les clichés sociaux, tout ce qui fait rire dans un groupe de potes. "
+                f"INTERDIT : la famille (parents, frères/sœurs, enfants), le racisme, l'homophobie, le handicap, la religion. "
+                f"Maximum 2-3 phrases. En français. Sois créatif, varié et sans pitié."
             )
             embed = discord.Embed(title=f"🔥 Roast du jour — {target.display_name}", description=text, color=discord.Color.orange())
             embed.set_footer(text="Roast automatique par Pyrosonge")
@@ -2916,10 +2920,12 @@ async def daily_compliment():
         try:
             text = await asyncio.to_thread(
                 generate_text_gemini,
-                f"Tu es un bot Discord bienveillant dans une guilde gaming. Génère un compliment sympa et original "
-                f"sur le joueur \"{target.display_name}\". Tu peux parler de gaming, d'entraide, de skill, "
-                f"de sa personnalité imaginaire, de sa valeur dans l'équipe, d'humour positif. "
-                f"Maximum 2 phrases. En français. Sois créatif et varié."
+                f"Tu es un bot Discord bienveillant et touchant. Génère un compliment sincère et original "
+                f"sur \"{target.display_name}\". Tu peux parler de : sa personnalité imaginaire, son charisme, "
+                f"son style, sa présence, son humour, sa gentillesse, son énergie, sa créativité, sa valeur humaine, "
+                f"ce qui le/la rend unique dans un groupe, des qualités qu'on remarque pas assez chez les gens. "
+                f"Pas besoin de parler de jeux vidéo. Sois sincère, chaleureux et créatif. "
+                f"Maximum 2-3 phrases. En français."
             )
             embed = discord.Embed(title=f"💖 Compliment du jour — {target.display_name}", description=text, color=discord.Color.magenta())
             embed.set_footer(text="Compliment automatique par Pyrosonge")

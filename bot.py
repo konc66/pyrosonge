@@ -699,19 +699,37 @@ async def channel_help_reminder():
     guild = bot.guilds[0] if bot.guilds else None
     if not guild:
         return
+    conn = sqlite3.connect("save.db")
+    c = conn.cursor()
     for channel_id, info in _get_channels_info().items():
         if not channel_id:
             continue
         channel = guild.get_channel(channel_id)
         if not channel:
             continue
+
+        # Supprimer l'ancien rappel s'il existe
+        meta_key = f"help_reminder_{channel_id}"
+        c.execute("SELECT value FROM bot_meta WHERE key = ?", (meta_key,))
+        row = c.fetchone()
+        if row:
+            try:
+                old_msg = await channel.fetch_message(int(row[0]))
+                await old_msg.delete()
+            except Exception:
+                pass
+
         embed = discord.Embed(title=info["title"], description=info["desc"], color=info["color"])
         embed.set_footer(text="Pyrosonge Bot — tape !aide n'importe où pour la liste complète")
         try:
-            await channel.send(embed=embed)
+            new_msg = await channel.send(embed=embed)
+            c.execute("INSERT INTO bot_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?",
+                      (meta_key, str(new_msg.id), str(new_msg.id)))
         except Exception as e:
             print(f"[HELP-REMINDER] Erreur envoi {channel.name}: {e}")
-    print("[HELP-REMINDER] Rappels commandes envoyés dans les salons dédiés.")
+    conn.commit()
+    conn.close()
+    print("[HELP-REMINDER] Rappels commandes envoyés (anciens supprimés).")
 
 
 @channel_help_reminder.before_loop
